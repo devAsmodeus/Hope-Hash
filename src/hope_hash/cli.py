@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from ._logging import logger, setup_logging
+from .address import validate_btc_address
 from .metrics import Metrics, MetricsServer
 from .miner import mine, supervisor_loop
 from .notifier import TelegramNotifier
@@ -88,6 +89,15 @@ def main():
 
     if not args.btc_address:
         print("error: btc_address обязателен (или используйте --demo)", file=sys.stderr)
+        sys.exit(2)
+
+    # Pre-flight: ловим опечатки/невалидный формат локально, до соединения с пулом.
+    # Без этого пул отклоняет mining.authorize, и пользователь видит мутное
+    # "auth failed" вместо конкретной причины.
+    try:
+        validate_btc_address(args.btc_address)
+    except ValueError as e:
+        print(f"error: некорректный BTC-адрес '{args.btc_address}': {e}", file=sys.stderr)
         sys.exit(2)
 
     # ─── observers ───
