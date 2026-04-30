@@ -69,6 +69,16 @@ def _parse_args() -> argparse.Namespace:
         metavar="DIFF",
         help="Сложность для demo-режима (по умолчанию: 0.001).",
     )
+    parser.add_argument(
+        "--benchmark", action="store_true",
+        help="Запустить бенчмарк pure-Python хешрейта (без сети, без шар). "
+             "Полезно как baseline перед оптимизациями (C/Rust/SIMD/GPU).",
+    )
+    parser.add_argument(
+        "--bench-duration", type=float, default=10.0,
+        metavar="SEC",
+        help="Длительность бенчмарка в секундах (по умолчанию: 10).",
+    )
     return parser.parse_args()
 
 
@@ -81,6 +91,15 @@ def main():
     setup_logging()
     args = _parse_args()
     n_workers = max(1, args.workers)
+
+    if args.benchmark and args.demo:
+        print("error: --benchmark и --demo взаимоисключающи", file=sys.stderr)
+        sys.exit(2)
+
+    if args.benchmark:
+        from .bench import run_benchmark
+        run_benchmark(duration_s=args.bench_duration, n_workers=n_workers)
+        return
 
     if args.demo:
         from .demo import run_demo
