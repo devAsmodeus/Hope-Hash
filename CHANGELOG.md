@@ -7,6 +7,43 @@
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-30
+
+### Добавлено
+- **Бенчмарк-режим** (`bench.py`): `hope-hash --benchmark [--bench-duration SEC]`.
+  Меряет pure-Python хешрейт без сети и без шар. Baseline для будущих
+  C/Rust/SIMD/GPU-оптимизаций (см. ROADMAP уровни 2–3). На Intel i7-12700H
+  даёт ~570 KH/s на воркер с mid-state SHA-256.
+- **Pre-flight валидация BTC-адреса** (`address.py`): bech32 (BIP-173),
+  bech32m (BIP-350), Base58Check. Mainnet-only. Опечатки и testnet-адреса
+  отвергаются локально, до сетевого round-trip к пулу.
+- **Тесты для StratumClient** (`test_stratum.py`): 15 тестов протокольного
+  слоя через FakeSocket-фикстуру (subscribe/authorize/notify/set_difficulty/
+  set_extranonce/submit/reader_loop). Закрывает крупнейшую неоттестированную
+  поверхность кода.
+- Тест на demo-режим в spawn-подпроцессе.
+- Тесты на адресную валидацию (18 шт).
+- Тесты на бенчмарк (3 шт).
+- Всего **101 тест** (было 64 до v0.3 audit tail).
+
+### Изменено
+- `parallel.stop_pool`: магическое 0.2с-окно drain-а заменено на
+  drain-until-`queue.Empty` с safety-cap. К моменту вызова все находки
+  уже в очереди или feeder-буфере воркера.
+- `miner.supervisor_loop`: `logger.error()` → `logger.exception()` —
+  unexpected ошибки теперь пишут полный traceback, а не молча
+  маскируются однострочным логом.
+- `miner.mine`: при потере шара (OSError на reconnect) лог теперь
+  включает `job_id`/`nonce`/`hash` — оператор может найти запись в
+  SQLite. Намеренно не ретраим: stale-share может привести к ban'у.
+- `stratum.py`: добавлены return-type аннотации, `submit()` параметры
+  типизированы, `_send` явно бросает OSError при `sock is None`.
+
+### Исправлено
+- `miner.mine`: проверка переполнения `extranonce2_counter` —
+  `f"{counter:0{en2_size*2}x}"` без проверки молча обрубал старшие
+  биты при `counter >= 2^(en2_size*8)`. Теперь wrap с warning-логом.
+
 ## [0.3.0] — 2026-04-30
 
 ### Добавлено
