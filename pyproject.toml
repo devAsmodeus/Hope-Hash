@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hope-hash"
+description = "Учебный solo BTC miner на чистом Python stdlib"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Pavel Kruglikovskii", email = "p.kruglikovskii@gmail.com" }]
+keywords = ["bitcoin", "mining", "stratum", "education", "stdlib"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Education",
+    "Topic :: Security :: Cryptography",
+]
+dependencies = []
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/KruglikovskiiPA/Hope-Hash"
+Issues = "https://github.com/KruglikovskiiPA/Hope-Hash/issues"
+
+[project.scripts]
+hope-hash = "hope_hash.cli:main"
+
+[tool.hatch.version]
+path = "src/hope_hash/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hope_hash"]
+
+# pytest можно запускать опционально, но в проекте идём на unittest.
+# Этот блок пригодится если кто-то захочет pytest:
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+python_files = ["test_*.py"]
+
+# Ruff/mypy — задел на будущее. Не активны пока пользователь не подключит [dev] extras.
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests"]
+strict = true
