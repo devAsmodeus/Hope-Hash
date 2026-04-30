@@ -7,6 +7,28 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-30
+
+### Добавлено
+- **Mid-state SHA-256** (`parallel.py`): block header 80 байт = 64 + 16.
+  Первые 64 байта — константа в пределах одного nonce-цикла. Pre-compute
+  через `hashlib.sha256().copy()` даёт ≈×1.5–2 к хешрейту без зависимостей.
+- **Demo-режим** (`demo.py`): `hope-hash --demo [--workers N] [--demo-diff DIFF]`.
+  Запускается без подключения к пулу; ищет nonce для синтетического заголовка
+  с низкой сложностью. Полезен для презентаций и offline-тестирования.
+- **Vardiff** (`stratum.py`): метод `suggest_difficulty(diff)` и
+  CLI-флаг `--suggest-diff FLOAT`. Отправляет `mining.suggest_difficulty`
+  после авторизации, чтобы запросить у пула удобную сложность для CPU.
+- 3 новых теста `TestMidstateSha256` в `test_block.py`. Всего **59 тестов**.
+
+### Исправлено
+- `miner.py`: голый `except Exception: pass` на `found_queue.get_nowait()`
+  заменён на `except queue.Empty:` — реальные ошибки больше не маскируются.
+- `parallel.py`: аналогичный fix в `stop_pool` при drain-е очереди.
+- `miner.py`, `parallel.py`: `time.time()` → `time.perf_counter()` для
+  всех относительных интервалов (EMA, alive-check, drain-deadline).
+  Защищает от ложных скачков при корректировке системных часов (NTP).
+
 ## [0.2.0] — 2026-04-30
 
 ### Добавлено

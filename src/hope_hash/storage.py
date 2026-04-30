@@ -95,6 +95,16 @@ class ShareStore:
             )
         return row_id
 
+    def update_share_accepted(self, share_id: int, accepted: bool) -> None:
+        """Обновляет флаг accepted по id записи (вызывается когда пул ответил)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE shares SET accepted=? WHERE id=?",
+                (int(accepted), share_id),
+            )
+            self._conn.commit()
+        logger.info("[storage] share id=%s → accepted=%s", share_id, accepted)
+
     def start_session(self, pool_host: str, btc_address: str, worker_name: str) -> int:
         """Регистрирует начало сессии. Возвращает session_id."""
         with self._lock:

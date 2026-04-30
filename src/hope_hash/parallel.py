@@ -13,12 +13,13 @@
   pickle-able (bytes, int, multiprocessing.Queue/Value/Event).
 """
 
+import hashlib
 import multiprocessing as mp
+import queue
 import struct
 import time
 
 from ._logging import logger
-from .block import double_sha256
 
 
 # Каждые столько хешей воркер сверяется со stop_event и инкрементирует
@@ -49,13 +50,26 @@ def worker(
     Сам ``submit`` делается из main process — здесь только находка.
     Сигнатура полностью pickle-able: bytes/int/str + примитивы mp.
     """
+    # Mid-state оптимизация: block header = 80 байт = 64 + 16.
+    # SHA-256 обрабатывает данные блоками по 64 байта, поэтому первые 64 байта
+    # header_base (version + prevhash + merkle_root[:28]) — константа в пределах
+    # одного nonce-цикла. Вычисляем SHA-256 mid-state один раз, а в горячем
+    # цикле делаем только copy() + дохэшируем оставшиеся 16 байт.
+    # Экономия: ~половина первого SHA-256-прохода на каждый nonce.
+    inner_mid = hashlib.sha256()
+    inner_mid.update(header_base[:64])
+    tail_prefix = header_base[64:]   # 12 байт: merkle_root[28:] + ntime + nbits
+
     local_hashes = 0  # копим локально, чтобы реже дёргать Lock на Value
     nonce = nonce_start
     try:
         while nonce < nonce_end:
-            # Хвост блока: 4 байта nonce, LE.
-            header = header_base + struct.pack("<I", nonce)
-            h = double_sha256(header)
+            # Горячий путь: copy mid-state + дохэшируем tail_prefix + nonce.
+            inner_h = inner_mid.copy()
+            inner_h.update(tail_prefix)
+            inner_h.update(struct.pack("<I", nonce))
+            # Внешний SHA-256 поверх дайджеста (double-SHA256).
+            h = hashlib.sha256(inner_h.digest()).digest()
 
             # Bitcoin сравнивает хеш как big-endian число — реверсим байты.
             h_int = int.from_bytes(h[::-1], "big")
@@ -146,11 +160,11 @@ def stop_pool(
 
     # Сначала пытаемся вытащить «уже найденные» шары — чтобы не потерялись.
     drained: list[tuple] = []
-    deadline = time.time() + 0.2
-    while time.time() < deadline:
+    deadline = time.perf_counter() + 0.2
+    while time.perf_counter() < deadline:
         try:
             drained.append(found_queue.get_nowait())
-        except Exception:
+        except queue.Empty:
             break
 
     for p in processes:
