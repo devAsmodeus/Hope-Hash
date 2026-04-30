@@ -46,10 +46,22 @@
 - [ ] TUI на `rich` / `curses` — отложено (зависимости либо ограниченная Win-поддержка)
 - [ ] Команды Telegram-бота (`/stats`, `/restart`) — отложено
 
+**Уровень 1.5 — глубокий аудит и UX (v0.3.0):**
+
+- [x] Mid-state SHA-256 (`hashlib.sha256().copy()` после первых 64 байт) — ≈×1.5–2 хешрейт
+- [x] `mining.suggest_difficulty` + CLI флаг `--suggest-diff` (vardiff)
+- [x] Demo-режим: `--demo [--demo-diff]` — offline-майнинг без подключения к пулу
+- [x] Pre-flight валидация BTC-адреса (bech32/bech32m/Base58Check, mainnet only)
+- [x] Prometheus метрики `hopehash_shares_accepted_total` / `_rejected_total`
+- [x] Запись шара в SQLite фиксируется только после подтверждения пула (`on_share_result` колбэк)
+- [x] `mining.authorize` ответ верифицируется (раньше отказ авторизации игнорировался)
+- [x] `time.perf_counter()` вместо `time.time()` для всех относительных интервалов
+- [x] `except queue.Empty` вместо bare `except Exception` в горячих циклах
+
 **Не сделано / известные ограничения:**
 
 - Нет UI — только консоль через `logging` и `/metrics` через HTTP.
-- Только Stratum V1, без `mining.suggest_difficulty` и без Stratum V2.
+- Только Stratum V1, без Stratum V2.
 - C/Rust/SIMD/GPU — Уровни 2–3, ещё впереди.
 
 ---
@@ -74,6 +86,8 @@
 │   ├── parallel.py            ← multiprocessing воркеры nonce-loop
 │   ├── stratum.py             ← StratumClient (TCP + JSON-RPC)
 │   ├── block.py               ← double_sha256, swap_words, target, merkle
+│   ├── address.py             ← валидация BTC-адресов (bech32/bech32m/Base58Check)
+│   ├── demo.py                ← offline-майнинг (--demo)
 │   ├── storage.py             ← SQLite журнал шаров и сессий
 │   ├── metrics.py             ← Prometheus экспортёр (http.server)
 │   ├── notifier.py            ← Telegram через urllib
@@ -81,10 +95,12 @@
 │   └── py.typed               ← PEP 561 marker
 └── tests/
     ├── conftest.py            ← общие фикстуры (заготовка)
-    ├── test_block.py          ← 15 тестов на чистые функции
-    ├── test_storage.py        ← 9 тестов на SQLite журнал
+    ├── test_block.py          ← 22 теста на чистые функции + mid-state
+    ├── test_storage.py        ← 11 тестов на SQLite журнал
     ├── test_metrics.py        ← 16 тестов на Prometheus экспортёр
-    └── test_notifier.py       ← 16 тестов на Telegram (через mock)
+    ├── test_notifier.py       ← 16 тестов на Telegram (через mock)
+    ├── test_address.py        ← 18 тестов на валидацию BTC-адреса
+    └── test_stratum.py        ← 15 тестов на Stratum-протокол (FakeSocket)
 ```
 
 ---
@@ -112,10 +128,28 @@ hope-hash bc1q5n2x4pvxhq8sxc7ck3uxq8sxc7ck3uxqzfm2py mylaptop
 
 ```bash
 hope-hash <BTC_адрес> mylaptop \
-  --workers 8 \           # число процессов (default: cpu_count - 1)
-  --db ./shares.db \      # путь к SQLite (default: hope_hash.db)
-  --metrics-port 9090     # Prometheus /metrics (0 — отключить)
+  --workers 8 \              # число процессов (default: cpu_count - 1)
+  --db ./shares.db \         # путь к SQLite (default: hope_hash.db)
+  --metrics-port 9090 \      # Prometheus /metrics (0 — отключить)
+  --suggest-diff 0.001       # vardiff: запросить у пула низкую сложность
 ```
+
+**Demo-режим (без подключения к пулу):**
+
+```bash
+hope-hash --demo                       # синтетический заголовок, низкая сложность
+hope-hash --demo --demo-diff 0.0001    # ещё ниже — найдёт быстрее
+hope-hash --demo --workers 4           # сколько процессов перебирают nonce
+```
+
+Demo не нуждается в BTC-адресе и не делает никаких сетевых вызовов — удобно для smoke-теста на машине, где нужно убедиться, что multiprocessing-воркеры стартуют корректно.
+
+**Валидация BTC-адреса** срабатывает локально перед подключением к пулу. Принимаются только mainnet-адреса:
+- `bc1q...` (P2WPKH, P2WSH) — bech32, BIP-173
+- `bc1p...` (Taproot) — bech32m, BIP-350
+- `1...` (P2PKH), `3...` (P2SH) — Base58Check
+
+Неверная контрольная сумма, смешанный регистр, testnet-префикс — отвергаются с конкретным сообщением, без сетевого round-trip.
 
 **Telegram-уведомления (опционально):** задать env vars и просто запустить:
 
@@ -128,10 +162,22 @@ hope-hash <BTC_адрес>
 **Тесты:**
 
 ```bash
-python -m unittest discover -s tests -v   # 56 тестов
+python -m unittest discover -s tests -v   # 97 тестов
 ```
 
-BTC-адрес нужен валидный (любой формат: `1...`, `3...`, `bc1q...`, `bc1p...`). Можно завести в любом некастодиальном кошельке — например, **Sparrow**, **Electrum**, **Wasabi**. Имя воркера — произвольная строка.
+**Prometheus-метрики, экспортируемые на `/metrics`:**
+
+| Метрика | Тип | Описание |
+|---|---|---|
+| `hopehash_hashrate_hps` | gauge | EMA-хешрейт в H/s |
+| `hopehash_pool_difficulty` | gauge | текущая сложность от пула |
+| `hopehash_workers` | gauge | число активных воркеров |
+| `hopehash_uptime_seconds` | gauge | время работы майнера |
+| `hopehash_shares_total` | counter | всего отправленных шаров |
+| `hopehash_shares_accepted_total` | counter | подтверждённых пулом |
+| `hopehash_shares_rejected_total` | counter | отклонённых пулом |
+
+BTC-адрес нужен валидный mainnet-адрес (`1...`, `3...`, `bc1q...`, `bc1p...`). Можно завести в любом некастодиальном кошельке — например, **Sparrow**, **Electrum**, **Wasabi**. Имя воркера — произвольная строка.
 
 **Что увидишь:**
 

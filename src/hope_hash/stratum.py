@@ -10,8 +10,8 @@ from ._logging import logger
 
 class StratumClient:
     def __init__(self, host: str, port: int, btc_address: str, worker_name: str = "py01",
-                 stop_event: threading.Event = None,
-                 suggest_diff: Optional[float] = None):
+                 stop_event: Optional[threading.Event] = None,
+                 suggest_diff: Optional[float] = None) -> None:
         self.host = host
         self.port = port
         self.username = f"{btc_address}.{worker_name}"
@@ -37,11 +37,13 @@ class StratumClient:
         self._submit_req_ids: set[int] = set()
         self._submit_lock = threading.Lock()
 
-    def connect(self):
+    def connect(self) -> None:
         self.sock = socket.create_connection((self.host, self.port), timeout=30)
         logger.info(f"[net] подключён к {self.host}:{self.port}")
 
     def _send(self, method: str, params: list) -> int:
+        if self.sock is None:
+            raise OSError("сокет не подключён")
         self.req_id += 1
         msg = json.dumps({"id": self.req_id, "method": method, "params": params}) + "\n"
         self.sock.sendall(msg.encode())
@@ -56,7 +58,7 @@ class StratumClient:
         line, _, self.buf = self.buf.partition(b"\n")
         return line.decode().strip()
 
-    def subscribe_and_authorize(self):
+    def subscribe_and_authorize(self) -> None:
         sub_id = self._send("mining.subscribe", ["py-solo-miner/0.1"])
         # Ответ на subscribe может прийти не первым — читаем до победы.
         while True:
@@ -87,7 +89,7 @@ class StratumClient:
         if self.suggest_diff is not None:
             self.suggest_difficulty(self.suggest_diff)
 
-    def _handle_message(self, msg: dict):
+    def _handle_message(self, msg: dict) -> None:
         method = msg.get("method")
         params = msg.get("params", []) or []
 
@@ -141,7 +143,7 @@ class StratumClient:
                 if self.on_share_result is not None:
                     self.on_share_result(req, accepted)
 
-    def reader_loop(self):
+    def reader_loop(self) -> None:
         """
         Фоновая нить, постоянно слушает сообщения от пула.
         Выходит при ошибке сети или при выставленном stop_event — главное,
@@ -167,14 +169,14 @@ class StratumClient:
         self._send("mining.suggest_difficulty", [diff])
         logger.info(f"[stratum] запрошена сложность {diff}")
 
-    def submit(self, job_id, extranonce2, ntime, nonce_hex) -> int:
+    def submit(self, job_id: str, extranonce2: str, ntime: str, nonce_hex: str) -> int:
         """Отправляет mining.submit. Возвращает req_id для отслеживания ответа."""
         req_id = self._send("mining.submit", [self.username, job_id, extranonce2, ntime, nonce_hex])
         with self._submit_lock:
             self._submit_req_ids.add(req_id)
         return req_id
 
-    def close(self):
+    def close(self) -> None:
         """Аккуратно гасим сокет: recv() в reader_loop разблокируется и нить выйдет."""
         try:
             if self.sock is not None:

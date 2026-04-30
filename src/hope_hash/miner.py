@@ -37,7 +37,7 @@ def run_session(client: StratumClient) -> threading.Thread:
     return t
 
 
-def supervisor_loop(client: StratumClient):
+def supervisor_loop(client: StratumClient) -> None:
     """
     Поднимает соединение и переподключается с экспоненциальным backoff
     (1с → 2с → 4с → ... до 60с) пока stop_event не выставлен.
@@ -54,8 +54,11 @@ def supervisor_loop(client: StratumClient):
                 reader_thread.join(timeout=1.0)
         except (ConnectionError, socket.error, OSError) as e:
             logger.warning(f"[net] не удалось подключиться: {e}")
-        except Exception as e:
-            logger.error(f"[net] непредвиденная ошибка сессии: {e}")
+        except Exception:
+            # Используем .exception() вместо .error(): пишет полный traceback,
+            # чтобы программерские баги (KeyError, AttributeError) не маскировались.
+            # Цикл всё равно продолжается — оператор сам решит, гасить ли майнер.
+            logger.exception("[net] непредвиденная ошибка сессии")
 
         if client.stop_event.is_set():
             break
@@ -106,7 +109,7 @@ def mine(
     store: Optional[ShareStore] = None,
     metrics: Optional[Metrics] = None,
     notifier: Optional[TelegramNotifier] = None,
-):
+) -> None:
     """
     Оркестратор пула воркеров.
 
@@ -167,6 +170,17 @@ def mine(
         # extranonce2 — наша часть coinbase, чтобы каждый воркер крутил уникальные хеши.
         # Поднимается на каждый job; в пределах одного job всё nonce-пространство
         # делится между процессами.
+        # Защита от переполнения: en2_size=2 → потолок 65536 jobs за сессию;
+        # при достижении — wrap, риск коллизии с уже отправленными шарами того же
+        # job минимален (новый job_id обычно приходит раньше, чем мы успеем 65k раз
+        # переинициализировать пул).
+        en2_max = 1 << (en2_size * 8)
+        if extranonce2_counter >= en2_max:
+            logger.warning(
+                f"[mine] extranonce2_counter переполнился (en2_size={en2_size}), "
+                f"wrap в 0"
+            )
+            extranonce2_counter = 0
         extranonce2 = f"{extranonce2_counter:0{en2_size * 2}x}"
         extranonce2_counter += 1
 
@@ -212,7 +226,13 @@ def mine(
                                 _pending_submits[req_id] = (share_id, current_job_id, current_diff)
                         except (OSError, AttributeError) as e:
                             # submit может прийтись на момент reconnect — не валим майнер.
-                            logger.warning(f"[stratum] не удалось отправить шар: {e}")
+                            # Не ретраим намеренно: к моменту reconnect job_id почти всегда
+                            # устарел, а отправка stale-шары может привести к temporary ban.
+                            # Шар уже записан в SQLite (accepted=False), оператор увидит факт.
+                            logger.warning(
+                                f"[stratum] не удалось отправить шар "
+                                f"(job={current_job_id} nonce={nonce_hex} hash={hash_hex}): {e}"
+                            )
                         if metrics is not None:
                             metrics.counter_inc(
                                 "hopehash_shares_total", 1,

@@ -17,7 +17,6 @@ import hashlib
 import multiprocessing as mp
 import queue
 import struct
-import time
 
 from ._logging import logger
 
@@ -151,17 +150,23 @@ def stop_pool(
     join_timeout: float = 5.0,
 ) -> None:
     """
-    Аккуратно гасит пул: set stop_event → join → terminate (если зависли) →
-    drain очереди. Очередь обязательно нужно осушить ДО join, иначе
-    дочерние процессы могут заблокироваться на ``Queue.put`` под капотом
-    feeder-нити (deadlock на Windows встречается особенно охотно).
+    Аккуратно гасит пул: set stop_event → drain очереди → join → terminate
+    (если зависли). Очередь обязательно нужно осушить ДО join, иначе дочерние
+    процессы могут заблокироваться на ``Queue.put`` под капотом feeder-нити
+    (deadlock на Windows встречается особенно охотно).
     """
     stop_event.set()
 
-    # Сначала пытаемся вытащить «уже найденные» шары — чтобы не потерялись.
+    # Сначала вытаскиваем «уже найденные» шары — чтобы не потерялись.
+    # Раньше тут было время-ориентированное окно (0.2с), но это магическое число
+    # без обоснования: воркер ставит put в очередь до проверки stop_event, поэтому
+    # к моменту вызова stop_pool() все находки уже либо в очереди, либо в feeder-
+    # буфере воркера (который доставит их в Queue до выхода). Достаточно опустошить
+    # очередь до queue.Empty с safety-кэпом против бесконечного цикла, если по
+    # какой-то причине поток ещё пишет.
     drained: list[tuple] = []
-    deadline = time.perf_counter() + 0.2
-    while time.perf_counter() < deadline:
+    drain_cap = 1024  # на пул в 16 воркеров с очень низким diff — с большим запасом
+    while len(drained) < drain_cap:
         try:
             drained.append(found_queue.get_nowait())
         except queue.Empty:
