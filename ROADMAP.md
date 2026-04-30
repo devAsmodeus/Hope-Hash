@@ -26,12 +26,15 @@
 
 ## Уровень 1 — лёгкие апгрейды (вечер каждый)
 
+**Статус (2026-04-30):** производительность + наблюдаемость — закрыто.
+TUI и команды Telegram — отложены.
+
 Видимые фичи, не требующие глубокой переработки.
 
 ### Производительность
 
-- [ ] **Multiprocessing.** Каждый CPU-ядро — отдельный процесс, общий `extranonce2` через `multiprocessing.Value`. Х2-х8 к хешрейту в зависимости от железа.
-- [ ] **Замер реального хешрейта по окнам.** Сейчас считается «за интервал печати», правильнее — скользящее окно с EMA (exponential moving average).
+- [x] **Multiprocessing.** `parallel.py`, CLI `--workers N`. nonce-пространство `[0, 2³²)` делится поровну между N процессами. found_queue + hashes_counter (`mp.Value('Q')`). На 16-CPU машине default = 15 воркеров.
+- [x] **EMA-хешрейт.** alpha=0.3, окно 5с. Сэмпл = дельта счётчика / dt. Логируется и в `[stats]`, и в Prometheus gauge `hopehash_hashrate_hps`.
 
 ### UI/UX
 
@@ -41,14 +44,14 @@
 
 ### Telegram-бот
 
-- [ ] **Уведомления о ключевых событиях:** старт майнера, потеря соединения, принятый шар, (мечты) найденный блок. Через `python-telegram-bot` или просто curl на `api.telegram.org`.
-- [ ] **Команды `/stats`, `/restart`, `/stop`** через того же бота.
+- [x] **Исходящие уведомления.** `notifier.py` через stdlib `urllib`, без `python-telegram-bot`. События: started / stopped / share_accepted / block_found / disconnected / reconnected. Конфиг через env (`HOPE_HASH_TELEGRAM_TOKEN`, `HOPE_HASH_TELEGRAM_CHAT_ID`). Если переменные не заданы — модуль молча disabled.
+- [ ] **Входящие команды `/stats`, `/restart`, `/stop`** через тот же бот (long polling). Отложено.
 
 ### Логи и метрики
 
-- [ ] **SQLite-журнал шар.** Каждый принятый шар → строка с timestamp, job_id, hash, difficulty.
-- [ ] **Экспорт в Prometheus формат** через эндпоинт `/metrics` на `http.server`.
-- [ ] **Grafana-дашборд** с готовым JSON для импорта.
+- [x] **SQLite-журнал** (`storage.py`). Таблицы `shares` (ts, job_id, nonce_hex, hash_hex, difficulty, accepted, is_block) и `sessions`. WAL-режим, потокобезопасность через `threading.Lock`.
+- [x] **Prometheus-экспортёр** (`metrics.py`). Эндпоинт `/metrics` на `http.server` (`ThreadingHTTPServer` в фоновой нити). Метрики: `hopehash_shares_total`, `hopehash_hashrate_hps`, `hopehash_pool_difficulty`, `hopehash_workers`, `hopehash_uptime_seconds`. CLI `--metrics-port` (0 — выключить).
+- [ ] **Grafana-дашборд** с готовым JSON для импорта. Отложено.
 
 ---
 

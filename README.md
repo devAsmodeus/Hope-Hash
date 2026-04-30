@@ -36,12 +36,21 @@
 - [x] CI matrix Python 3.11/3.12/3.13 × ubuntu/windows/macos
 - [ ] Конфиг через CLI/YAML — перенесено в Уровень 1
 
+**Уровень 1 — производительность и наблюдаемость: завершён.**
+
+- [x] Multiprocessing: N воркеров (default `cpu_count - 1`), флаг `--workers`
+- [x] EMA-хешрейт (alpha=0.3, окно 5с)
+- [x] SQLite-журнал шаров и сессий (`storage.py`, флаг `--db`)
+- [x] Prometheus-метрики на `/metrics` (`metrics.py`, флаг `--metrics-port`)
+- [x] Telegram-уведомления (через stdlib urllib, env-конфиг)
+- [ ] TUI на `rich` / `curses` — отложено (зависимости либо ограниченная Win-поддержка)
+- [ ] Команды Telegram-бота (`/stats`, `/restart`) — отложено
+
 **Не сделано / известные ограничения:**
 
-- Один поток → ~50–200 KH/s на ноуте. Нет multiprocessing.
-- Нет персистентной статистики (логов, БД).
-- Нет UI — только консоль через `logging`.
+- Нет UI — только консоль через `logging` и `/metrics` через HTTP.
 - Только Stratum V1, без `mining.suggest_difficulty` и без Stratum V2.
+- C/Rust/SIMD/GPU — Уровни 2–3, ещё впереди.
 
 ---
 
@@ -60,15 +69,22 @@
 ├── src/hope_hash/
 │   ├── __init__.py            ← публичный API + __version__
 │   ├── __main__.py            ← `python -m hope_hash`
-│   ├── cli.py                 ← argparse, точка входа
-│   ├── miner.py               ← mine(), supervisor_loop, run_session
+│   ├── cli.py                 ← argparse, точка входа, инициализация observers
+│   ├── miner.py               ← mine() оркестратор + supervisor_loop
+│   ├── parallel.py            ← multiprocessing воркеры nonce-loop
 │   ├── stratum.py             ← StratumClient (TCP + JSON-RPC)
 │   ├── block.py               ← double_sha256, swap_words, target, merkle
+│   ├── storage.py             ← SQLite журнал шаров и сессий
+│   ├── metrics.py             ← Prometheus экспортёр (http.server)
+│   ├── notifier.py            ← Telegram через urllib
 │   ├── _logging.py            ← настройка logger("hope_hash")
 │   └── py.typed               ← PEP 561 marker
 └── tests/
     ├── conftest.py            ← общие фикстуры (заготовка)
-    └── test_block.py          ← 15 unittest-тестов на чистые функции
+    ├── test_block.py          ← 15 тестов на чистые функции
+    ├── test_storage.py        ← 9 тестов на SQLite журнал
+    ├── test_metrics.py        ← 16 тестов на Prometheus экспортёр
+    └── test_notifier.py       ← 16 тестов на Telegram (через mock)
 ```
 
 ---
@@ -92,10 +108,27 @@ python -m hope_hash <BTC_адрес> [имя_воркера]
 hope-hash bc1q5n2x4pvxhq8sxc7ck3uxq8sxc7ck3uxqzfm2py mylaptop
 ```
 
+**Расширенные опции:**
+
+```bash
+hope-hash <BTC_адрес> mylaptop \
+  --workers 8 \           # число процессов (default: cpu_count - 1)
+  --db ./shares.db \      # путь к SQLite (default: hope_hash.db)
+  --metrics-port 9090     # Prometheus /metrics (0 — отключить)
+```
+
+**Telegram-уведомления (опционально):** задать env vars и просто запустить:
+
+```bash
+export HOPE_HASH_TELEGRAM_TOKEN=123456:abcdef-your-bot-token
+export HOPE_HASH_TELEGRAM_CHAT_ID=123456789
+hope-hash <BTC_адрес>
+```
+
 **Тесты:**
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v   # 56 тестов
 ```
 
 BTC-адрес нужен валидный (любой формат: `1...`, `3...`, `bc1q...`, `bc1p...`). Можно завести в любом некастодиальном кошельке — например, **Sparrow**, **Electrum**, **Wasabi**. Имя воркера — произвольная строка.
