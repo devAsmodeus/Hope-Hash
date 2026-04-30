@@ -1,5 +1,6 @@
 """Главный цикл хеширования mine() и сетевой супервизор переподключений."""
 
+import queue
 import socket
 import threading
 import time
@@ -24,6 +25,8 @@ def run_session(client: StratumClient) -> threading.Thread:
     """
     client.buf = b""              # буфер от прошлой сессии больше не валиден
     client.req_id = 0
+    with client._submit_lock:
+        client._submit_req_ids.clear()  # req_id-счётчик сбрасывается → старые id невалидны
     with client.job_lock:
         client.current_job = None  # extranonce1 после reconnect может смениться
     client.connect()
@@ -126,11 +129,37 @@ def mine(
     alpha = 0.3
     report_interval = 5.0
 
+    # Ожидающие ответа пула: req_id → share_db_id.
+    # submit() (mine-thread) пишет, on_share_result (reader-thread) читает → нужен lock.
+    _pending_submits: dict[int, int] = {}
+    _pending_lock = threading.Lock()
+
+    def _on_share_result(req_id: int, accepted: bool) -> None:
+        with _pending_lock:
+            entry = _pending_submits.pop(req_id, None)
+        if entry is None:
+            return
+        share_id, job_id, diff = entry
+        if store is not None:
+            store.update_share_accepted(share_id, accepted)
+        if metrics is not None:
+            label = "hopehash_shares_accepted_total" if accepted else "hopehash_shares_rejected_total"
+            metrics.counter_inc(label, 1,
+                                help="Shares confirmed accepted by pool" if accepted
+                                else "Shares rejected by pool")
+        if notifier is not None and accepted:
+            notifier.notify_share_accepted(job_id=job_id, difficulty=diff)
+
+    client.on_share_result = _on_share_result
+
     while not stop_event.is_set():
         with client.job_lock:
             job = client.current_job
             en1 = client.extranonce1
             en2_size = client.extranonce2_size
+            # difficulty читается под тем же локом, которым stratum.py защищает запись,
+            # чтобы job + difficulty всегда были согласованной парой.
+            current_diff = client.difficulty
         if not job or not en1:
             time.sleep(0.5)
             continue
@@ -142,16 +171,20 @@ def mine(
         extranonce2_counter += 1
 
         header_base = _build_header_base(job, en1, extranonce2)
-        target = difficulty_to_target(client.difficulty)
+        target = difficulty_to_target(current_diff)
         current_job_id = job["job_id"]
+
+        # Шары с прошлого job никогда не получат ответ (job_id уже невалиден).
+        with _pending_lock:
+            _pending_submits.clear()
 
         processes, found_queue, hashes_counter, mp_stop = start_pool(
             n_workers, header_base, target, extranonce2,
         )
 
         prev_count = 0
-        last_report = time.time()
-        last_alive_check = time.time()
+        last_report = time.perf_counter()
+        last_alive_check = time.perf_counter()
 
         # ─── основной цикл одного job ───
         try:
@@ -163,32 +196,32 @@ def mine(
                         logger.warning(
                             f"[mine] !!! НАЙДЕН ШАР !!! nonce={nonce_hex}  hash={hash_hex}"
                         )
+                        # Записываем шар как «отправлен, ответ ожидается» (accepted=False).
+                        # Когда пул ответит, on_share_result обновит флаг через req_id.
+                        share_id: Optional[int] = None
+                        if store is not None:
+                            share_id = store.record_share(
+                                job_id=current_job_id, nonce_hex=nonce_hex,
+                                hash_hex=hash_hex, difficulty=current_diff,
+                                accepted=False,
+                            )
                         try:
-                            client.submit(current_job_id, en2, job["ntime"], nonce_hex)
+                            req_id = client.submit(current_job_id, en2, job["ntime"], nonce_hex)
+                            with _pending_lock:
+                                # Кортеж: (share_id, job_id, difficulty) для callback.
+                                _pending_submits[req_id] = (share_id, current_job_id, current_diff)
                         except (OSError, AttributeError) as e:
                             # submit может прийтись на момент reconnect — не валим майнер.
                             logger.warning(f"[stratum] не удалось отправить шар: {e}")
-                        # Хуки наблюдателей. Все опциональны — None означает disabled.
-                        if store is not None:
-                            store.record_share(
-                                job_id=current_job_id, nonce_hex=nonce_hex,
-                                hash_hex=hash_hex, difficulty=client.difficulty,
-                                accepted=True,
-                            )
                         if metrics is not None:
                             metrics.counter_inc(
                                 "hopehash_shares_total", 1,
-                                help="Total shares submitted (accepted by client side)",
+                                help="Total shares submitted to pool (pending pool confirmation)",
                             )
-                        if notifier is not None:
-                            notifier.notify_share_accepted(
-                                job_id=current_job_id, difficulty=client.difficulty,
-                            )
-                except Exception:
-                    # Empty/queue closed — единственный нормальный путь выхода из while.
+                except queue.Empty:
                     pass
 
-                now = time.time()
+                now = time.perf_counter()
 
                 # 2. EMA-хешрейт.
                 if now - last_report >= report_interval:
@@ -199,7 +232,7 @@ def mine(
                     logger.info(
                         f"[stats] хешрейт ≈ {_format_rate(ema)} "
                         f"(окно {_format_rate(sample)})  |  "
-                        f"pool diff = {client.difficulty}  |  workers = {len(processes)}"
+                        f"pool diff = {current_diff}  |  workers = {len(processes)}"
                     )
                     if metrics is not None:
                         metrics.gauge_set(
@@ -207,7 +240,7 @@ def mine(
                             help="Current EMA hashrate in hashes per second",
                         )
                         metrics.gauge_set(
-                            "hopehash_pool_difficulty", float(client.difficulty),
+                            "hopehash_pool_difficulty", float(current_diff),
                             help="Current pool difficulty",
                         )
                         metrics.gauge_set(

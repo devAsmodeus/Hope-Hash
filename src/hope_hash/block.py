@@ -20,6 +20,8 @@ def swap_words(hex_str: str) -> bytes:
     в заголовок блока его надо положить именно так. Главный gotcha Stratum V1.
     """
     raw = bytes.fromhex(hex_str)
+    if len(raw) % 4 != 0:
+        raise ValueError(f"swap_words требует кратность 4 байтам, получено {len(raw)}")
     return b"".join(raw[i:i+4][::-1] for i in range(0, len(raw), 4))
 
 
@@ -28,6 +30,8 @@ def difficulty_to_target(diff: float) -> int:
     Pool-сложность → численный target. Шар принимается, если SHA256d(header) <= target.
     diff=1 соответствует базовому target Bitcoin diff-1.
     """
+    if diff <= 0:
+        raise ValueError(f"difficulty должна быть положительной, получено {diff}")
     return int(DIFF1_TARGET / diff)
 
 

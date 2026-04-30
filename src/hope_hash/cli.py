@@ -3,6 +3,7 @@
 import argparse
 import multiprocessing
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -30,7 +31,9 @@ def _parse_args() -> argparse.Namespace:
         prog="hope_hash",
         description="Учебный solo BTC miner на чистом stdlib.",
     )
-    parser.add_argument("btc_address", help="BTC-адрес для выплат (на него уйдёт награда).")
+    parser.add_argument("btc_address", nargs="?", default=None,
+                        help="BTC-адрес для выплат (на него уйдёт награда). "
+                             "Не нужен в режиме --demo.")
     parser.add_argument("worker_name", nargs="?", default="py01",
                         help="Имя воркера (по умолчанию: py01).")
     parser.add_argument(
@@ -49,6 +52,22 @@ def _parse_args() -> argparse.Namespace:
         "--metrics-port", type=int, default=9090,
         help="Порт Prometheus /metrics (по умолчанию: 9090, 0 — отключить).",
     )
+    parser.add_argument(
+        "--suggest-diff", type=float, default=None,
+        metavar="DIFF",
+        help="Запросить у пула эту сложность после авторизации (vardiff). "
+             "Пример: --suggest-diff 0.001",
+    )
+    parser.add_argument(
+        "--demo", action="store_true",
+        help="Запустить demo-режим без подключения к пулу: "
+             "ищет nonce для синтетического блока с низкой сложностью.",
+    )
+    parser.add_argument(
+        "--demo-diff", type=float, default=0.001,
+        metavar="DIFF",
+        help="Сложность для demo-режима (по умолчанию: 0.001).",
+    )
     return parser.parse_args()
 
 
@@ -61,6 +80,15 @@ def main():
     setup_logging()
     args = _parse_args()
     n_workers = max(1, args.workers)
+
+    if args.demo:
+        from .demo import run_demo
+        run_demo(n_workers=n_workers, diff=args.demo_diff)
+        return
+
+    if not args.btc_address:
+        print("error: btc_address обязателен (или используйте --demo)", file=sys.stderr)
+        sys.exit(2)
 
     # ─── observers ───
     # Все три опциональны и не зависят друг от друга. Каждый сам решает,
@@ -87,7 +115,7 @@ def main():
     # ─── сетевая часть и mine() ───
     stop = threading.Event()
     client = StratumClient(POOL_HOST, POOL_PORT, args.btc_address, args.worker_name,
-                           stop_event=stop)
+                           stop_event=stop, suggest_diff=args.suggest_diff)
 
     # Сетевая часть живёт в отдельной нити-супервизоре: она держит коннект,
     # переподключается при разрывах и сама поднимает reader_loop. main thread

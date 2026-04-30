@@ -65,6 +65,11 @@ class TestSwapWords(unittest.TestCase):
         # На вход — hex-строка, на выход — именно bytes (а не hex).
         self.assertIsInstance(swap_words("00000000"), bytes)
 
+    def test_non_multiple_of_4_raises(self):
+        # 3 байта (6 hex символов) — не кратно 4: должна быть ValueError.
+        with self.assertRaises(ValueError):
+            swap_words("010203")
+
 
 class TestDifficultyToTarget(unittest.TestCase):
     """Pool difficulty -> численный target. diff=1 — это базовый Bitcoin diff-1."""
@@ -82,6 +87,14 @@ class TestDifficultyToTarget(unittest.TestCase):
     def test_difficulty_1024(self):
         # diff=1024 — diff-1 / 1024. Типичный порядок для соло-пулов.
         self.assertEqual(difficulty_to_target(1024), int(self.DIFF1_TARGET / 1024))
+
+    def test_zero_difficulty_raises(self):
+        with self.assertRaises(ValueError):
+            difficulty_to_target(0)
+
+    def test_negative_difficulty_raises(self):
+        with self.assertRaises(ValueError):
+            difficulty_to_target(-1.0)
 
     def test_higher_diff_means_smaller_target(self):
         # Чем больше сложность, тем меньше target — инварианта майнинга.
@@ -124,6 +137,52 @@ class TestBuildMerkleRoot(unittest.TestCase):
         # Merkle root — всегда 32 байта (это всё ещё SHA-256).
         result = build_merkle_root(b"\x00" * 32, ["11" * 32])
         self.assertEqual(len(result), 32)
+
+
+class TestMidstateSha256(unittest.TestCase):
+    """Mid-state оптимизация через hashlib.copy() даёт тот же результат, что double_sha256."""
+
+    def _midstate_double_sha256(self, data: bytes) -> bytes:
+        """Эмулирует логику из parallel.worker: split на первые 64 байта + хвост."""
+        inner_mid = __import__("hashlib").sha256()
+        inner_mid.update(data[:64])
+        tail = data[64:]
+        inner_h = inner_mid.copy()
+        inner_h.update(tail)
+        return __import__("hashlib").sha256(inner_h.digest()).digest()
+
+    def test_midstate_matches_full_hash_80bytes(self):
+        # Канонический 80-байтный block header: убеждаемся, что mid-state даёт
+        # тот же результат, что прямой double_sha256 на полных данных.
+        header = b"\xab\xcd" * 40  # 80 байт произвольных данных
+        self.assertEqual(self._midstate_double_sha256(header), double_sha256(header))
+
+    def test_midstate_matches_known_header(self):
+        # Реалистичные данные: version(4) + prevhash(32) + merkle(32) + ntime(4) + nbits(4) + nonce(4)
+        version  = b"\x01\x00\x00\x00"
+        prevhash = bytes.fromhex("0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098")
+        merkle   = b"\xaa" * 32
+        ntime    = b"\x29\xab\x5f\x49"
+        nbits    = b"\xff\xff\x00\x1d"
+        nonce    = b"\x01\x00\x00\x00"
+        header = version + prevhash + merkle + ntime + nbits + nonce
+        self.assertEqual(len(header), 80)
+        self.assertEqual(self._midstate_double_sha256(header), double_sha256(header))
+
+    def test_midstate_different_nonces_give_different_hashes(self):
+        # Гарантируем, что copy() не «залипает» на одном состоянии между итерациями.
+        base = b"\x00" * 76
+        import hashlib, struct
+        mid = hashlib.sha256()
+        mid.update(base[:64])
+        tail = base[64:]
+        hashes = set()
+        for n in range(10):
+            h = mid.copy()
+            h.update(tail)
+            h.update(struct.pack("<I", n))
+            hashes.add(hashlib.sha256(h.digest()).digest())
+        self.assertEqual(len(hashes), 10, "Каждый nonce должен давать уникальный хеш")
 
 
 if __name__ == "__main__":

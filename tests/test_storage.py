@@ -97,6 +97,20 @@ class TestShareStore(unittest.TestCase):
         (is_block,) = cur.fetchone()
         self.assertEqual(is_block, 1)
 
+    def test_update_share_accepted_from_false_to_true(self):
+        # record_share с accepted=False → update_share_accepted → total_shares считает.
+        rid = self._share(accepted=False)
+        self.assertEqual(self.store.total_shares(accepted_only=True), 0)
+        self.store.update_share_accepted(rid, True)
+        self.assertEqual(self.store.total_shares(accepted_only=True), 1)
+
+    def test_update_share_accepted_rejected(self):
+        # Запись изначально как pending (accepted=False), затем пул отклоняет.
+        rid = self._share(accepted=False)
+        self.store.update_share_accepted(rid, False)
+        self.assertEqual(self.store.total_shares(accepted_only=True), 0)
+        self.assertEqual(self.store.total_shares(accepted_only=False), 1)
+
     def test_thread_safety(self):
         # 4 нити пишут по 50 шаров каждая. После — total_shares == 200.
         n_threads = 4
