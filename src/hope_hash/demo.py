@@ -17,7 +17,7 @@ from .block import difficulty_to_target
 from .parallel import start_pool, stop_pool
 
 
-def run_demo(n_workers: int = 1, diff: float = 0.001) -> None:
+def run_demo(n_workers: int = 1, diff: float = 0.001) -> bool:
     """
     Один раунд demo-майнинга.
 
@@ -25,6 +25,9 @@ def run_demo(n_workers: int = 1, diff: float = 0.001) -> None:
         n_workers  — число параллельных процессов (как в реальном майнинге).
         diff       — желаемая сложность. 0.001 → ~4 млн хешей в среднем,
                      при ~200 KH/s на воркер ожидание ≈ 5–20с.
+
+    Возвращает True, если nonce найден; False — если все воркеры исчерпали
+    своё nonce-пространство без находки (возможно при очень высокой diff).
     """
     # Синтетический 76-байтовый header_base:
     # version(4) + prevhash(32) + merkle_root(32) + ntime(4) + nbits(4)
@@ -68,3 +71,4 @@ def run_demo(n_workers: int = 1, diff: float = 0.001) -> None:
     if not found:
         logger.warning("[demo] nonce не найден в заданном пространстве")
     logger.info("[demo] demo-режим завершён")
+    return found
