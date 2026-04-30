@@ -28,8 +28,8 @@ dependencies = []
 dynamic = ["version"]
 
 [project.urls]
-Repository = "https://github.com/KruglikovskiiPA/Hope-Hash"
-Issues = "https://github.com/KruglikovskiiPA/Hope-Hash/issues"
+Repository = "https://github.com/devAsmodeus/Hope-Hash"
+Issues = "https://github.com/devAsmodeus/Hope-Hash/issues"
 
 [project.scripts]
 hope-hash = "hope_hash.cli:main"

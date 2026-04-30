@@ -16,6 +16,10 @@ htmlcov/
 venv/
 env/
 *.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 .idea/
 .vscode/
 .DS_Store

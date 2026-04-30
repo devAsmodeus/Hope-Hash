@@ -1,12 +1,16 @@
 """Главный цикл хеширования mine() и сетевой супервизор переподключений."""
 
 import socket
-import struct
 import threading
 import time
+from typing import Optional
 
 from ._logging import logger
 from .block import build_merkle_root, difficulty_to_target, double_sha256, swap_words
+from .metrics import Metrics
+from .notifier import TelegramNotifier
+from .parallel import start_pool, stop_pool
+from .storage import ShareStore
 from .stratum import StratumClient
 
 
@@ -64,10 +68,63 @@ def supervisor_loop(client: StratumClient):
 
 # ─────────────────────── основной майнинг-цикл ───────────────────────
 
-def mine(client: StratumClient, stop_event: threading.Event):
-    hashes = 0
-    last_print = time.time()
+def _build_header_base(job: dict, extranonce1: str, extranonce2: str) -> bytes:
+    """
+    Собирает 76-байтовый префикс block header (всё, кроме nonce).
+
+    Вынесено в отдельную функцию: воркеры nonce-loop теперь в parallel.py,
+    а main process только формирует header_base и отдаёт его в пул.
+    """
+    coinbase_hex = job["coinb1"] + extranonce1 + extranonce2 + job["coinb2"]
+    coinbase_hash = double_sha256(bytes.fromhex(coinbase_hex))
+    merkle_root = build_merkle_root(coinbase_hash, job["merkle_branch"])
+    return (
+        bytes.fromhex(job["version"])[::-1] +    # 4 b version (LE)
+        swap_words(job["prevhash"]) +            # 32 b prev hash (word-swap)
+        merkle_root +                            # 32 b merkle (LE)
+        bytes.fromhex(job["ntime"])[::-1] +      # 4 b ntime (LE)
+        bytes.fromhex(job["nbits"])[::-1]        # 4 b nbits (LE)
+    )
+
+
+def _format_rate(rate: float) -> str:
+    """Человекочитаемый хешрейт: H/s → KH/s → MH/s."""
+    if rate < 1000:
+        return f"{rate:.0f} H/s"
+    if rate < 1_000_000:
+        return f"{rate/1000:.2f} KH/s"
+    return f"{rate/1_000_000:.2f} MH/s"
+
+
+def mine(
+    client: StratumClient,
+    stop_event: threading.Event,
+    n_workers: int = 1,
+    store: Optional[ShareStore] = None,
+    metrics: Optional[Metrics] = None,
+    notifier: Optional[TelegramNotifier] = None,
+):
+    """
+    Оркестратор пула воркеров.
+
+    Логика:
+    1. Ждём первый job, собираем header_base.
+    2. Поднимаем пул (start_pool) с уникальным extranonce2.
+    3. В цикле: читаем found_queue, считаем EMA-хешрейт, следим за сменой job.
+    4. При смене job_id (или stop_event) — gracefully гасим пул и идём на 1.
+
+    EMA: alpha=0.3, окно ~5с. Сэмпл = (current_counter - prev_counter) / dt.
+    Счётчик не сбрасываем — храним предыдущее значение и считаем дельту,
+    так точнее и не надо синхронизироваться с воркерами через Lock.
+
+    Опциональные наблюдатели (store/metrics/notifier) подключаются хуками
+    на ключевые события: найденный шар → запись в БД + counter в Prometheus +
+    уведомление в Telegram; EMA-хешрейт → gauge.
+    """
     extranonce2_counter = 0
+    ema = 0.0
+    alpha = 0.3
+    report_interval = 5.0
 
     while not stop_event.is_set():
         with client.job_lock:
@@ -79,65 +136,103 @@ def mine(client: StratumClient, stop_event: threading.Event):
             continue
 
         # extranonce2 — наша часть coinbase, чтобы каждый воркер крутил уникальные хеши.
+        # Поднимается на каждый job; в пределах одного job всё nonce-пространство
+        # делится между процессами.
         extranonce2 = f"{extranonce2_counter:0{en2_size * 2}x}"
         extranonce2_counter += 1
 
-        # Собираем coinbase = coinb1 + extranonce1 + extranonce2 + coinb2
-        coinbase_hex = job["coinb1"] + en1 + extranonce2 + job["coinb2"]
-        coinbase_hash = double_sha256(bytes.fromhex(coinbase_hex))
-
-        # Считаем merkle root через ветки от пула
-        merkle_root = build_merkle_root(coinbase_hash, job["merkle_branch"])
-
-        # Базовый block header без nonce (76 байт = 80 - 4)
-        header_base = (
-            bytes.fromhex(job["version"])[::-1] +    # 4 b version (LE)
-            swap_words(job["prevhash"]) +            # 32 b prev hash (word-swap)
-            merkle_root +                            # 32 b merkle (LE)
-            bytes.fromhex(job["ntime"])[::-1] +      # 4 b ntime (LE)
-            bytes.fromhex(job["nbits"])[::-1]        # 4 b nbits (LE)
-        )
-
+        header_base = _build_header_base(job, en1, extranonce2)
         target = difficulty_to_target(client.difficulty)
         current_job_id = job["job_id"]
 
-        # Перебор nonce: 0 .. 2^32 - 1
-        for nonce in range(0, 0xFFFFFFFF):
-            if stop_event.is_set():
-                return
+        processes, found_queue, hashes_counter, mp_stop = start_pool(
+            n_workers, header_base, target, extranonce2,
+        )
 
-            # Если пришла свежая работа — выходим, чтобы не тратить время на старую
-            if hashes & 0x3FFF == 0:  # каждые 16k хешей дёргаем lock, чтобы не душить нить
-                with client.job_lock:
-                    if not client.current_job or client.current_job["job_id"] != current_job_id:
-                        break
+        prev_count = 0
+        last_report = time.time()
+        last_alive_check = time.time()
 
-            header = header_base + struct.pack("<I", nonce)
-            h = double_sha256(header)
-
-            # хеш в Bitcoin сравнивается как big-endian число (после реверса байтов)
-            h_int = int.from_bytes(h[::-1], "big")
-
-            if h_int <= target:
-                nonce_hex = struct.pack(">I", nonce).hex()
-                logger.warning(
-                    f"[mine] !!! НАЙДЕН ШАР !!! nonce={nonce_hex}  hash={h[::-1].hex()}"
-                )
+        # ─── основной цикл одного job ───
+        try:
+            while not stop_event.is_set():
+                # 1. Не блокирующее чтение находок.
                 try:
-                    client.submit(current_job_id, extranonce2, job["ntime"], nonce_hex)
-                except (OSError, AttributeError) as e:
-                    # submit может прийтись на момент reconnect — не валим майнер.
-                    logger.warning(f"[stratum] не удалось отправить шар: {e}")
+                    while True:
+                        nonce_hex, hash_hex, en2 = found_queue.get_nowait()
+                        logger.warning(
+                            f"[mine] !!! НАЙДЕН ШАР !!! nonce={nonce_hex}  hash={hash_hex}"
+                        )
+                        try:
+                            client.submit(current_job_id, en2, job["ntime"], nonce_hex)
+                        except (OSError, AttributeError) as e:
+                            # submit может прийтись на момент reconnect — не валим майнер.
+                            logger.warning(f"[stratum] не удалось отправить шар: {e}")
+                        # Хуки наблюдателей. Все опциональны — None означает disabled.
+                        if store is not None:
+                            store.record_share(
+                                job_id=current_job_id, nonce_hex=nonce_hex,
+                                hash_hex=hash_hex, difficulty=client.difficulty,
+                                accepted=True,
+                            )
+                        if metrics is not None:
+                            metrics.counter_inc(
+                                "hopehash_shares_total", 1,
+                                help="Total shares submitted (accepted by client side)",
+                            )
+                        if notifier is not None:
+                            notifier.notify_share_accepted(
+                                job_id=current_job_id, difficulty=client.difficulty,
+                            )
+                except Exception:
+                    # Empty/queue closed — единственный нормальный путь выхода из while.
+                    pass
 
-            hashes += 1
+                now = time.time()
 
-            # Каждые 5 секунд — статистика
-            now = time.time()
-            if now - last_print >= 5.0:
-                rate = hashes / (now - last_print)
-                rate_str = f"{rate:.0f} H/s" if rate < 1000 else f"{rate/1000:.2f} KH/s"
-                logger.info(
-                    f"[stats] хешрейт ≈ {rate_str}  |  pool diff = {client.difficulty}"
-                )
-                hashes = 0
-                last_print = now
+                # 2. EMA-хешрейт.
+                if now - last_report >= report_interval:
+                    with hashes_counter.get_lock():
+                        cur = hashes_counter.value
+                    sample = (cur - prev_count) / (now - last_report)
+                    ema = sample if ema == 0.0 else alpha * sample + (1 - alpha) * ema
+                    logger.info(
+                        f"[stats] хешрейт ≈ {_format_rate(ema)} "
+                        f"(окно {_format_rate(sample)})  |  "
+                        f"pool diff = {client.difficulty}  |  workers = {len(processes)}"
+                    )
+                    if metrics is not None:
+                        metrics.gauge_set(
+                            "hopehash_hashrate_hps", ema,
+                            help="Current EMA hashrate in hashes per second",
+                        )
+                        metrics.gauge_set(
+                            "hopehash_pool_difficulty", float(client.difficulty),
+                            help="Current pool difficulty",
+                        )
+                        metrics.gauge_set(
+                            "hopehash_workers", float(len(processes)),
+                            help="Number of active worker processes",
+                        )
+                    prev_count = cur
+                    last_report = now
+
+                # 3. Смена job — выходим из цикла, чтобы пересоздать пул.
+                with client.job_lock:
+                    cj = client.current_job
+                if not cj or cj["job_id"] != current_job_id:
+                    logger.info(f"[mine] job сменился ({current_job_id} → "
+                                f"{cj['job_id'] if cj else 'None'}), рестарт пула")
+                    break
+
+                # 4. Все воркеры исчерпали nonce-пространство?
+                if now - last_alive_check >= 1.0:
+                    if not any(p.is_alive() for p in processes):
+                        logger.info("[pool] все воркеры исчерпали nonce — берём новый extranonce2")
+                        break
+                    last_alive_check = now
+
+                # Дёшево спим, чтобы не жечь main CPU на busy-loop.
+                time.sleep(0.05)
+        finally:
+            stop_pool(processes, found_queue, mp_stop)
