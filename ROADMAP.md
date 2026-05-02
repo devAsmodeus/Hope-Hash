@@ -72,11 +72,17 @@ TUI и команды Telegram — отложены.
 
 ### Web-морда
 
-- [ ] **FastAPI-сервис рядом с майнером.** Эндпоинты:
-  - `GET /stats` — JSON со статистикой
-  - `POST /restart` — перезапуск нитей
-  - `GET /` — HTML-страница с дашбордом
-  - `WS /live` — WebSocket стрим хешей в реальном времени
+- [x] **Web-дашборд на stdlib `http.server`** (`webui.py`, v0.7.0):
+  CLI `--web-port`, single-page HTML без CDN, vanilla JS, inline-SVG
+  sparkline. Эндпоинты:
+  - `GET /` — HTML-дашборд с polling `/api/stats` каждые 2с.
+  - `GET /api/stats` — JSON snapshot (no-store).
+  - `GET /api/events` — Server-Sent Events (`share_*` / `job` / `pool`).
+  - `GET /healthz` — то же тело, что у metrics-сервера.
+  FastAPI / WebSocket вариант не делаем — Stdlib + SSE покрывает
+  потребности дашборда без новых зависимостей.
+- [ ] **POST /restart / POST /stop через web** — остался на потом
+  (Telegram-команды уже есть). Веб-эндпоинты потребуют CSRF + auth.
 - [ ] **Конфиг через web-интерфейс**, чтобы не редактировать YAML руками.
 
 ---
@@ -97,7 +103,7 @@ TUI и команды Telegram — отложены.
 ### Мониторинг и SRE
 
 - [x] **Healthchecks endpoint.** `/healthz` JSON на metrics-сервере (v0.5.0). 200/503, флаг `--healthz-stale-after`.
-- [ ] **Docker-образ.** `Dockerfile`, `docker-compose.yml` с volumes для логов и конфигов.
+- [x] **Docker-образ.** `Dockerfile` (`python:3.11-slim`, healthcheck через stdlib `urllib`) + `docker-compose.yml` (miner + Prometheus + Grafana, volumes для SQLite и provisioning) + `.dockerignore` (v0.7.0).
 - [ ] **Helm chart**, если совсем хочется хардкора с k8s на одном Raspberry Pi.
 
 ---
@@ -115,6 +121,29 @@ TUI и команды Telegram — отложены.
 - [ ] **Лидерборд между друзьями.** Несколько твоих знакомых ставят майнер с разными worker-name на один и тот же BTC-адрес. Лидерборд показывает, кто из вас вносит больше хешрейта в общий пул. Если кто-то найдёт блок (хаха) — делите по вкладу.
 
 ---
+
+## Сознательно отложено (не включено в v0.7.0)
+
+После трёх PR'ов (ops/UX, perf/resilience, web/docs) вот что **намеренно**
+не сделано — каждое требует либо новой зависимости, либо отдельного
+крупного эпика:
+
+- **Stratum V2.** Бинарный протокол с Noise-handshake. Реализация
+  Noise на stdlib возможна, но нетривиальный sub-project; ждёт
+  отдельного PR.
+- **Rust core через PyO3.** Требует Rust toolchain в build. Ожидаемый
+  выигрыш ~×100, но это уже не «учебный проект, который можно
+  установить через `pip install -e .`».
+- **GPU (PyOpenCL / cupy).** Большие сторонние зависимости и
+  привязка к драйверам. Не вписывается в pure-stdlib.
+- **FastAPI вместо stdlib `http.server`.** Дала бы swagger / async, но
+  это +большая зависимость. Текущий webui выдерживает все требования
+  дашборда без них.
+- **Helm chart / k8s manifests.** Compose-стек покрывает все реальные
+  use-кейсы для проекта такого масштаба.
+- **POST `/stop` / `/restart` через web.** Telegram-команды уже
+  существуют; web-write-эндпоинты потребуют auth + CSRF — отдельный
+  эпик.
 
 ## Если выбирать одно
 

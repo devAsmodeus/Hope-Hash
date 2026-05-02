@@ -1,6 +1,6 @@
 """Hope-Hash — учебный solo BTC miner на чистом stdlib."""
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 from . import sha_native
 from .banner import print_banner, render_banner
@@ -23,6 +23,7 @@ from .solo import (
 from .storage import ShareStore
 from .stratum import StratumClient
 from .tui import StatsProvider, StatsSnapshot, TUIApp
+from .webui import WebUIServer, render_html
 
 __all__ = [
     "double_sha256",
@@ -56,5 +57,7 @@ __all__ = [
     "parse_default_witness_commitment",
     "serialize_block",
     "sha_native",
+    "WebUIServer",
+    "render_html",
     "__version__",
 ]
