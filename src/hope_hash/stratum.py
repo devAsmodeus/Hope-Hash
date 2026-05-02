@@ -49,6 +49,26 @@ class StratumClient:
         self.sock = socket.create_connection((self.host, self.port), timeout=30)
         logger.info(f"[net] подключён к {self.host}:{self.port}")
 
+    def set_endpoint(self, host: str, port: int) -> None:
+        """Перенацеливает клиента на другой пул без пересоздания объекта.
+
+        Сохраняет ``on_share_result``, ``stop_event``, ``suggest_diff``,
+        ``username`` и локи. Сбрасывает буфер/req_id/job — после connect()
+        пул выдаст новые данные, а старые могут запутать reader_loop.
+
+        Используется multi-pool failover'ом из supervisor_loop().
+        """
+        self.host = host
+        self.port = int(port)
+        self.buf = b""
+        self.req_id = 0
+        with self._submit_lock:
+            self._submit_req_ids.clear()
+        with self.job_lock:
+            self.current_job = None
+            self.extranonce1 = ""
+            self.extranonce2_size = 0
+
     def _send(self, method: str, params: list[Any]) -> int:
         if self.sock is None:
             raise OSError("сокет не подключён")

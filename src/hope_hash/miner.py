@@ -13,6 +13,7 @@ from .block import build_merkle_root, difficulty_to_target, double_sha256, swap_
 from .metrics import Metrics
 from .notifier import TelegramNotifier
 from .parallel import start_pool, stop_pool
+from .pools import PoolList
 from .storage import ShareStore
 from .stratum import StratumClient
 from .tui import StatsProvider
@@ -43,24 +44,47 @@ def run_session(client: StratumClient) -> threading.Thread:
 def supervisor_loop(
     client: StratumClient,
     restart_event: Optional[threading.Event] = None,
+    pools: Optional[PoolList] = None,
+    stats_provider: Optional[StatsProvider] = None,
 ) -> None:
     """
     Поднимает соединение и переподключается с экспоненциальным backoff
     (1с → 2с → 4с → ... до 60с) пока stop_event не выставлен.
     Запускается в отдельной нити, чтобы main thread мог крутить mine().
 
-    ``restart_event`` (опционально) — сигнал «дёрнуть текущий коннект и
-    переподключиться». Используется обработчиком ``/restart`` из Telegram.
-    Будучи установленным, закрывает сокет (это разбудит reader_loop, и
-    тот вернёт управление); supervisor увидит выход reader-а и пойдёт на
-    новый цикл connect/subscribe.
+    ``restart_event`` — сигнал «дёрнуть текущий коннект и переподключиться»
+    (используется обработчиком ``/restart`` из Telegram). При установке
+    закрываем сокет (это разбудит reader_loop), тот вернёт управление,
+    supervisor увидит выход reader-а и пойдёт на новый цикл.
+
+    ``pools`` — список endpoint'ов для multi-pool failover. Если задан:
+    при провале коннекта/сессии вызывается ``mark_failed()``; после N
+    провалов список ротирует, supervisor переинициализирует ``client``
+    через ``set_endpoint()``. После полного круга без успехов
+    применяется обычный exponential backoff.
+
+    ``stats_provider`` — опционально, чтобы пушить актуальный pool URL
+    в TUI/healthz при ротации.
     """
     backoff = 1
+    # Если pools задан — перенацеливаем клиент на текущий endpoint
+    # ДО первого connect: пользователь мог передать --pool, отличный
+    # от того, с которым создавался StratumClient.
+    if pools is not None:
+        host, port = pools.current()
+        client.set_endpoint(host, port)
+        if stats_provider is not None:
+            stats_provider.update_pool(pools.current_url())
+
     while not client.stop_event.is_set():
         reader_thread = None
+        session_succeeded = False
         try:
             reader_thread = run_session(client)
+            session_succeeded = True
             backoff = 1  # успешный коннект — сбрасываем задержку
+            if pools is not None:
+                pools.mark_success()
             # Ждём, пока reader не выйдет (по ошибке сети или stop_event).
             while reader_thread.is_alive() and not client.stop_event.is_set():
                 reader_thread.join(timeout=1.0)
@@ -70,7 +94,7 @@ def supervisor_loop(
                     restart_event.clear()
                     break
         except (ConnectionError, socket.error, OSError) as e:
-            logger.warning(f"[net] не удалось подключиться: {e}")
+            logger.warning(f"[net] не удалось подключиться к {client.host}:{client.port}: {e}")
         except Exception:
             # Используем .exception() вместо .error(): пишет полный traceback,
             # чтобы программерские баги (KeyError, AttributeError) не маскировались.
@@ -82,6 +106,34 @@ def supervisor_loop(
 
         # reader умер сам (разрыв TCP) — закрываем сокет и ждём.
         client.close()
+
+        # Multi-pool failover: считаем как failure только если коннект не поднялся.
+        # Если session_succeeded=True, это «прожили какое-то время и упали» —
+        # это не повод сразу прыгать на другой пул, дадим тому же шанс через backoff.
+        if pools is not None and not session_succeeded:
+            rotated = pools.mark_failed()
+            if rotated:
+                new_host, new_port = pools.current()
+                logger.warning(
+                    f"[pool] ротация на следующий пул: {new_host}:{new_port}"
+                )
+                client.set_endpoint(new_host, new_port)
+                if stats_provider is not None:
+                    stats_provider.update_pool(pools.current_url())
+                # Если только что обошли весь круг без успеха — ждём backoff,
+                # потом начинаем новый круг.
+                if pools.full_cycle_failed():
+                    logger.warning(
+                        f"[pool] все {pools.size} пул(ов) недоступны, ждём {backoff}с"
+                    )
+                    if client.stop_event.wait(timeout=backoff):
+                        break
+                    backoff = min(backoff * 2, 60)
+                    pools.reset_round()
+                else:
+                    # Только ротация, без backoff — следующий пул может быть жив.
+                    continue
+
         logger.warning(f"[net] reconnect через {backoff}с")
         # Ждём через wait(), чтобы Ctrl+C прерывал паузу мгновенно.
         if client.stop_event.wait(timeout=backoff):
@@ -127,6 +179,7 @@ def mine(
     metrics: Optional[Metrics] = None,
     notifier: Optional[TelegramNotifier] = None,
     stats_provider: Optional[StatsProvider] = None,
+    sha_backend: str = "hashlib",
 ) -> None:
     """
     Оркестратор пула воркеров.
@@ -217,6 +270,7 @@ def mine(
 
         processes, found_queue, hashes_counter, mp_stop = start_pool(
             n_workers, header_base, target, extranonce2,
+            sha_backend=sha_backend,
         )
 
         prev_count = 0

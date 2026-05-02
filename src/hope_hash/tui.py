@@ -105,6 +105,15 @@ class StatsProvider:
             else:
                 self._snap.shares_rejected += 1
 
+    def update_pool(self, pool_url: str) -> None:
+        """Меняет текущий pool URL (для multi-pool failover).
+
+        TUI читает это поле каждый кадр — обновление видно сразу
+        после ротации в supervisor_loop.
+        """
+        with self._lock:
+            self._snap.pool_url = str(pool_url)
+
 
 def format_rate(rate: float) -> str:
     """Человекочитаемый хешрейт. Копия из miner._format_rate (без импорта)."""
