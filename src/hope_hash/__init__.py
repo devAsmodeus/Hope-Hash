@@ -1,15 +1,18 @@
 """Hope-Hash — учебный solo BTC miner на чистом stdlib."""
 
+__version__ = "0.5.0"
+
+from .banner import print_banner, render_banner
 from .bench import BenchResult, run_benchmark
 from .block import build_merkle_root, difficulty_to_target, double_sha256, swap_words
 from .demo import run_demo
-from .metrics import Metrics, MetricsServer
+from .metrics import Metrics, MetricsServer, build_health_snapshot
 from .miner import mine
 from .notifier import TelegramNotifier
 from .storage import ShareStore
 from .stratum import StratumClient
+from .tui import StatsProvider, StatsSnapshot, TUIApp
 
-__version__ = "0.4.0"
 __all__ = [
     "double_sha256",
     "swap_words",
@@ -23,6 +26,12 @@ __all__ = [
     "ShareStore",
     "Metrics",
     "MetricsServer",
+    "build_health_snapshot",
     "TelegramNotifier",
+    "StatsProvider",
+    "StatsSnapshot",
+    "TUIApp",
+    "print_banner",
+    "render_banner",
     "__version__",
 ]
