@@ -262,5 +262,111 @@ class TestNotifierEnabled(unittest.TestCase):
         self.assertIn("worker-7", first_body)
 
 
+class TestNotifierInbound(unittest.TestCase):
+    """Inbound long-poll: dispatch команд и authz по chat_id."""
+
+    @patch("hope_hash.notifier.urllib.request.urlopen")
+    def test_inbound_disabled_when_notifier_disabled(self, mock_urlopen):
+        n = TelegramNotifier()  # disabled
+        self.assertFalse(n.start_inbound())
+        n.shutdown()
+
+    @patch("hope_hash.notifier.urllib.request.urlopen")
+    def test_handle_update_dispatches_known_command(self, mock_urlopen):
+        # _handle_update — pure-функция в смысле unit-теста (одно сообщение).
+        # Проверяем что зарегистрированный handler вызывается, а ack уходит в очередь.
+        mock_urlopen.return_value = _make_mock_response()
+        n = TelegramNotifier(token="t", chat_id="42")
+        called = []
+
+        def stats_handler():
+            called.append(True)
+            return "stats reply"
+
+        n.register_command("/stats", stats_handler)
+
+        n._handle_update({
+            "update_id": 1,
+            "message": {
+                "chat": {"id": 42},
+                "text": "/stats",
+            },
+        })
+        n.shutdown()
+        self.assertEqual(len(called), 1)
+        # Ack отправлен через outbound queue → urlopen.
+        self.assertTrue(mock_urlopen.called)
+
+    @patch("hope_hash.notifier.urllib.request.urlopen")
+    def test_handle_update_rejects_foreign_chat(self, mock_urlopen):
+        mock_urlopen.return_value = _make_mock_response()
+        n = TelegramNotifier(token="t", chat_id="42")
+        called = []
+        n.register_command("/stats", lambda: called.append(True) or "x")
+
+        # Чужой chat_id — handler НЕ должен сработать.
+        with self.assertLogs("hope_hash", level="WARNING") as cm:
+            n._handle_update({
+                "update_id": 2,
+                "message": {
+                    "chat": {"id": 9999},
+                    "text": "/stats",
+                },
+            })
+        n.shutdown()
+
+        self.assertEqual(len(called), 0)
+        self.assertTrue(any("чужого chat_id" in line for line in cm.output))
+
+    @patch("hope_hash.notifier.urllib.request.urlopen")
+    def test_handle_update_ignores_unknown_command(self, mock_urlopen):
+        mock_urlopen.return_value = _make_mock_response()
+        n = TelegramNotifier(token="t", chat_id="42")
+        called = []
+        n.register_command("/stats", lambda: called.append(True) or None)
+
+        n._handle_update({
+            "update_id": 3,
+            "message": {"chat": {"id": 42}, "text": "/wat"},
+        })
+        n.shutdown()
+        self.assertEqual(len(called), 0)
+
+    @patch("hope_hash.notifier.urllib.request.urlopen")
+    def test_handle_update_strips_botname_suffix(self, mock_urlopen):
+        # /stats@MyBot должно трактоваться как /stats.
+        mock_urlopen.return_value = _make_mock_response()
+        n = TelegramNotifier(token="t", chat_id="42")
+        called = []
+        n.register_command("/stats", lambda: called.append(True) or None)
+
+        n._handle_update({
+            "update_id": 4,
+            "message": {"chat": {"id": 42}, "text": "/stats@HopeHashBot"},
+        })
+        n.shutdown()
+        self.assertEqual(len(called), 1)
+
+    @patch("hope_hash.notifier.urllib.request.urlopen")
+    def test_handle_update_advances_offset(self, mock_urlopen):
+        mock_urlopen.return_value = _make_mock_response()
+        n = TelegramNotifier(token="t", chat_id="42")
+        n._handle_update({"update_id": 100, "message": {"chat": {"id": 42}, "text": "ok"}})
+        # _last_update_id должен подняться.
+        self.assertEqual(n._last_update_id, 100)
+        # Меньший id не должен снизить:
+        n._handle_update({"update_id": 50, "message": {"chat": {"id": 42}, "text": "ok"}})
+        self.assertEqual(n._last_update_id, 100)
+        n.shutdown()
+
+    def test_inbound_enabled_in_env_flag(self):
+        with patch.dict(os.environ, {"HOPE_HASH_TELEGRAM_INBOUND": "1"}, clear=True):
+            self.assertTrue(TelegramNotifier.inbound_enabled_in_env())
+        with patch.dict(os.environ, {"HOPE_HASH_TELEGRAM_INBOUND": "no"}, clear=True):
+            self.assertFalse(TelegramNotifier.inbound_enabled_in_env())
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(TelegramNotifier.inbound_enabled_in_env())
+
+
 if __name__ == "__main__":
     unittest.main()
