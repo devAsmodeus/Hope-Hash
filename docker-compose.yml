@@ -1,0 +1,94 @@
+# Hope-Hash полный стек: miner + Prometheus + Grafana.
+#
+# Перед запуском:
+#   1. Положить mainnet BTC-адрес в .env как BTC_ADDRESS=bc1q...
+#      (можно подсунуть через `BTC_ADDRESS=... docker compose up`).
+#   2. Опционально: HOPE_HASH_TELEGRAM_TOKEN и HOPE_HASH_TELEGRAM_CHAT_ID
+#      для Telegram-уведомлений.
+#
+#   docker compose up -d
+#   open http://localhost:8000      # web-дашборд
+#   open http://localhost:3000      # Grafana (admin / admin при первом входе)
+#   open http://localhost:9090      # Prometheus UI
+#
+# Если порт 8000 занят — поменяйте маппинг здесь и у Prometheus в
+# deploy/prometheus/prometheus.yml.
+
+services:
+  miner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hope-hash:0.7.0
+    container_name: hope-hash-miner
+    restart: unless-stopped
+    # Single combined HTTP-port: --metrics-port 8000 для /metrics+/healthz,
+    # --web-port 8001 — отдельный для дашборда. Compose пробрасывает оба.
+    command: >
+      ${BTC_ADDRESS:?Set BTC_ADDRESS env var to your mainnet wallet address}
+      docker
+      --workers ${WORKERS:-2}
+      --db /data/hope_hash.db
+      --metrics-port 8000
+      --web-port 8001
+      --web-host 0.0.0.0
+      --no-banner
+      --healthz-stale-after 600
+    environment:
+      # Telegram опционален — если не задан, notifier тихо отключается.
+      HOPE_HASH_TELEGRAM_TOKEN: ${HOPE_HASH_TELEGRAM_TOKEN:-}
+      HOPE_HASH_TELEGRAM_CHAT_ID: ${HOPE_HASH_TELEGRAM_CHAT_ID:-}
+      # Включает long-poll для команд /stats/stop/restart. По умолчанию off.
+      HOPE_HASH_TELEGRAM_INBOUND: ${HOPE_HASH_TELEGRAM_INBOUND:-0}
+    volumes:
+      # SQLite-журнал шар хранится снаружи контейнера, чтобы выживать рестарты.
+      - ./data:/data
+    ports:
+      - "8000:8000"   # /metrics + /healthz (Prometheus scrape + k8s probe)
+      - "8001:8001"   # web-дашборд (HTML + /api/stats + SSE)
+    networks: [hope-net]
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: hope-hash-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - miner
+    networks: [hope-net]
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: hope-hash-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      # Provisioning datasource (Prometheus) и dashboard (hope-hash.json).
+      - ./deploy/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./deploy/grafana/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml:ro
+      - ./deploy/grafana:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks: [hope-net]
+
+networks:
+  hope-net:
+    driver: bridge
+
+volumes:
+  prom-data:
+  grafana-data:
