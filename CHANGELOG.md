@@ -7,6 +7,48 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-02
+
+### Добавлено
+- **Curses TUI-дашборд** (`tui.py`): `hope-hash --tui`. Постоянное окно с
+  EMA-хешрейтом, аптаймом, шарами (sent/ok/rej), pool diff, текущим job_id,
+  числом воркеров. Quit на `q`/`ESC`/`Ctrl+C`. На Windows без
+  `windows-curses` graceful fallback (warning + продолжаем без TUI),
+  чтобы не ломать `cli.main()` для тех, кто запустил с голым CPython.
+- **`StatsProvider`** (`tui.py`): thread-safe шина между `mine()` и
+  потребителями (TUI/healthz/web). Pure-Python, без curses-зависимостей.
+- **`--no-banner`** и ASCII-логотип (`banner.py`): при старте печатается
+  «HOPE HASH» в ASCII; для cron/systemd подавляется флагом.
+- **Healthcheck endpoint** (`metrics.py`): `GET /healthz` отдаёт JSON
+  `{status, uptime_s, last_share_ts, ...}`. `ok` (200) когда reader жив,
+  EMA свежее 30с, шар в пределах `--healthz-stale-after` секунд.
+  `degraded` (200) — что-то одно подвыпало. `down` (503) — reader умер.
+  Внутри: чистая `build_health_snapshot()` тестируется без сети.
+- **Telegram inbound-команды** (`notifier.py`, `tg_commands` встроены):
+  long-poll `getUpdates` в фоновой нити, диспатч `/stats`, `/stop`,
+  `/restart`, `/help`. Authz по `chat_id`. Включается через
+  `HOPE_HASH_TELEGRAM_INBOUND=1` (по умолчанию off — чтобы не открывать
+  поллер без явного opt-in).
+- **`--log-file PATH`**: дублирует логи в файл. Особенно полезно с `--tui`,
+  где stdout занят дашбордом.
+- **Grafana-дашборд** (`deploy/grafana/hope-hash.json`): минимальный JSON
+  для Grafana 10.x, datasource templated как `prometheus`. Панели:
+  hashrate over time, pool diff, shares accepted vs rejected (stacked
+  bar), workers gauge, uptime stat.
+- **Type annotations** в `miner.py` и `stratum.py` доведены до 100%.
+- **Тесты**: `test_tui.py` (StatsProvider, форматтеры), `test_banner.py`,
+  `test_healthz.py` (snapshot + HTTP), `test_notifier_timing.py`
+  (notify_share_accepted дёргается ТОЛЬКО из ack-callback, не из submit).
+  Расширен `test_notifier.py` (inbound dispatch + chat_id authz).
+  Всего **145 тестов** (было 101).
+
+### Изменено
+- `mine()` принимает опциональный `stats_provider: StatsProvider` —
+  пушит EMA/job/share-события в общую шину, чтобы TUI и healthz видели
+  одно и то же состояние.
+- `supervisor_loop()` принимает опциональный `restart_event` — для
+  обработчика `/restart` из Telegram.
+
 ## [0.4.0] — 2026-04-30
 
 ### Добавлено

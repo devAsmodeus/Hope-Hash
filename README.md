@@ -8,6 +8,17 @@
 
 ---
 
+## Что нового в v0.5.0
+
+Ops & UX полировка: `--tui` — curses-дашборд (EMA-хешрейт, шары,
+job_id, аптайм; quit на `q`), ASCII-баннер при старте (`--no-banner`
+для cron), `/healthz` JSON-эндпоинт на `/metrics`-сервере (200/503
+для k8s liveness), Telegram inbound-команды `/stats`/`/stop`/`/restart`
+(opt-in через `HOPE_HASH_TELEGRAM_INBOUND=1`, authz по chat_id),
+готовый Grafana-дашборд в `deploy/grafana/hope-hash.json`. Полный
+API `mine()` теперь принимает `stats_provider: StatsProvider` —
+единая шина данных для TUI и web (web придёт в v0.7.0).
+
 ## Статус: что уже сделано
 
 - [x] TCP-клиент к `solo.ckpool.org:3333` через стандартную `socket`
@@ -189,7 +200,7 @@ hope-hash <BTC_адрес>
 **Тесты:**
 
 ```bash
-python -m unittest discover -s tests -v   # 101 тест
+python -m unittest discover -s tests -v   # 145 тестов
 ```
 
 **Prometheus-метрики, экспортируемые на `/metrics`:**

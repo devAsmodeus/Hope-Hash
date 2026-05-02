@@ -38,20 +38,20 @@ TUI и команды Telegram — отложены.
 
 ### UI/UX
 
-- [ ] **TUI на `rich`.** Постоянный дашборд со столбиками: текущий хешрейт, средний за час, аптайм, найденные шары, текущий job_id, pool difficulty. Обновляется in-place.
-- [ ] **Альтернатива — `curses` дашборд** для терминалов без поддержки `rich`.
-- [ ] **ASCII-арт логотип** в шапке при старте (когда определишься с названием).
+- [ ] **TUI на `rich`.** Не делаем — `rich` не входит в stdlib. Заменено на `curses` ниже.
+- [x] **`curses` дашборд** (`--tui`, v0.5.0). На Windows degrade без падения.
+- [x] **ASCII-арт логотип** при старте (`banner.py`, v0.5.0). Гасится `--no-banner`.
 
 ### Telegram-бот
 
 - [x] **Исходящие уведомления.** `notifier.py` через stdlib `urllib`, без `python-telegram-bot`. События: started / stopped / share_accepted / block_found / disconnected / reconnected. Конфиг через env (`HOPE_HASH_TELEGRAM_TOKEN`, `HOPE_HASH_TELEGRAM_CHAT_ID`). Если переменные не заданы — модуль молча disabled.
-- [ ] **Входящие команды `/stats`, `/restart`, `/stop`** через тот же бот (long polling). Отложено.
+- [x] **Входящие команды `/stats`, `/restart`, `/stop`** (long polling, v0.5.0). Authz по chat_id, opt-in через `HOPE_HASH_TELEGRAM_INBOUND=1`.
 
 ### Логи и метрики
 
 - [x] **SQLite-журнал** (`storage.py`). Таблицы `shares` (ts, job_id, nonce_hex, hash_hex, difficulty, accepted, is_block) и `sessions`. WAL-режим, потокобезопасность через `threading.Lock`.
 - [x] **Prometheus-экспортёр** (`metrics.py`). Эндпоинт `/metrics` на `http.server` (`ThreadingHTTPServer` в фоновой нити). Метрики: `hopehash_shares_total`, `hopehash_hashrate_hps`, `hopehash_pool_difficulty`, `hopehash_workers`, `hopehash_uptime_seconds`. CLI `--metrics-port` (0 — выключить).
-- [ ] **Grafana-дашборд** с готовым JSON для импорта. Отложено.
+- [x] **Grafana-дашборд** (`deploy/grafana/hope-hash.json`, v0.5.0). 5 панелей: hashrate / pool diff / shares stacked / workers / uptime.
 
 ---
 
@@ -95,7 +95,7 @@ TUI и команды Telegram — отложены.
 
 ### Мониторинг и SRE
 
-- [ ] **Healthchecks endpoint.** Для k8s/docker liveness + readiness.
+- [x] **Healthchecks endpoint.** `/healthz` JSON на metrics-сервере (v0.5.0). 200/503, флаг `--healthz-stale-after`.
 - [ ] **Docker-образ.** `Dockerfile`, `docker-compose.yml` с volumes для логов и конфигов.
 - [ ] **Helm chart**, если совсем хочется хардкора с k8s на одном Raspberry Pi.
 
