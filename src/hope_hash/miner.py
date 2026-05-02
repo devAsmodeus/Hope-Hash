@@ -1,5 +1,7 @@
 """Главный цикл хеширования mine() и сетевой супервизор переподключений."""
 
+from __future__ import annotations
+
 import queue
 import socket
 import threading
@@ -13,6 +15,7 @@ from .notifier import TelegramNotifier
 from .parallel import start_pool, stop_pool
 from .storage import ShareStore
 from .stratum import StratumClient
+from .tui import StatsProvider
 
 
 # ─────────────────────── сетевой супервизор ───────────────────────
@@ -37,11 +40,20 @@ def run_session(client: StratumClient) -> threading.Thread:
     return t
 
 
-def supervisor_loop(client: StratumClient) -> None:
+def supervisor_loop(
+    client: StratumClient,
+    restart_event: Optional[threading.Event] = None,
+) -> None:
     """
     Поднимает соединение и переподключается с экспоненциальным backoff
     (1с → 2с → 4с → ... до 60с) пока stop_event не выставлен.
     Запускается в отдельной нити, чтобы main thread мог крутить mine().
+
+    ``restart_event`` (опционально) — сигнал «дёрнуть текущий коннект и
+    переподключиться». Используется обработчиком ``/restart`` из Telegram.
+    Будучи установленным, закрывает сокет (это разбудит reader_loop, и
+    тот вернёт управление); supervisor увидит выход reader-а и пойдёт на
+    новый цикл connect/subscribe.
     """
     backoff = 1
     while not client.stop_event.is_set():
@@ -52,6 +64,11 @@ def supervisor_loop(client: StratumClient) -> None:
             # Ждём, пока reader не выйдет (по ошибке сети или stop_event).
             while reader_thread.is_alive() and not client.stop_event.is_set():
                 reader_thread.join(timeout=1.0)
+                if restart_event is not None and restart_event.is_set():
+                    logger.info("[net] получен restart-сигнал, закрываем сессию")
+                    client.close()  # разбудит reader_loop через recv-ошибку
+                    restart_event.clear()
+                    break
         except (ConnectionError, socket.error, OSError) as e:
             logger.warning(f"[net] не удалось подключиться: {e}")
         except Exception:
@@ -109,6 +126,7 @@ def mine(
     store: Optional[ShareStore] = None,
     metrics: Optional[Metrics] = None,
     notifier: Optional[TelegramNotifier] = None,
+    stats_provider: Optional[StatsProvider] = None,
 ) -> None:
     """
     Оркестратор пула воркеров.
@@ -150,6 +168,11 @@ def mine(
             metrics.counter_inc(label, 1,
                                 help="Shares confirmed accepted by pool" if accepted
                                 else "Shares rejected by pool")
+        if stats_provider is not None:
+            stats_provider.record_share(accepted=accepted)
+        # ВАЖНО: notify_share_accepted дёргается ТОЛЬКО из callback'а пула,
+        # НЕ из submit-пути. Это закрывает дыру, когда мы радуемся «принят»
+        # ещё до подтверждения и потом удивляемся reject-ам в счётчике.
         if notifier is not None and accepted:
             notifier.notify_share_accepted(job_id=job_id, difficulty=diff)
 
@@ -238,6 +261,10 @@ def mine(
                                 "hopehash_shares_total", 1,
                                 help="Total shares submitted to pool (pending pool confirmation)",
                             )
+                        if stats_provider is not None:
+                            # accepted=None: пока не подтверждено пулом, просто
+                            # инкрементируем «отправлено» и фиксируем ts.
+                            stats_provider.record_share(accepted=None)
                 except queue.Empty:
                     pass
 
@@ -266,6 +293,13 @@ def mine(
                         metrics.gauge_set(
                             "hopehash_workers", float(len(processes)),
                             help="Number of active worker processes",
+                        )
+                    if stats_provider is not None:
+                        stats_provider.update_hashrate(
+                            ema=ema, last_sample=sample, workers=len(processes),
+                        )
+                        stats_provider.update_job(
+                            job_id=current_job_id, pool_difficulty=current_diff,
                         )
                     prev_count = cur
                     last_report = now

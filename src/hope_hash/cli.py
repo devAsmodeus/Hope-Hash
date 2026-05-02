@@ -1,6 +1,9 @@
 """Точка входа CLI: argparse, запуск supervisor + mine() + observers."""
 
+from __future__ import annotations
+
 import argparse
+import logging
 import multiprocessing
 import os
 import sys
@@ -10,11 +13,13 @@ from pathlib import Path
 
 from ._logging import logger, setup_logging
 from .address import validate_btc_address
-from .metrics import Metrics, MetricsServer
+from .banner import print_banner
+from .metrics import Metrics, MetricsServer, build_health_snapshot
 from .miner import mine, supervisor_loop
 from .notifier import TelegramNotifier
 from .storage import ShareStore
 from .stratum import StratumClient
+from .tui import StatsProvider, TUIApp, format_rate, format_uptime, is_curses_available
 
 
 POOL_HOST = "solo.ckpool.org"
@@ -79,7 +84,74 @@ def _parse_args() -> argparse.Namespace:
         metavar="SEC",
         help="Длительность бенчмарка в секундах (по умолчанию: 10).",
     )
+    parser.add_argument(
+        "--tui", action="store_true",
+        help="Включить curses-дашборд (на Windows нужен windows-curses; "
+             "при отсутствии — graceful skip с логом).",
+    )
+    parser.add_argument(
+        "--no-banner", action="store_true",
+        help="Не печатать ASCII-баннер при старте (для systemd/cron-режима).",
+    )
+    parser.add_argument(
+        "--log-file", type=str, default=None,
+        metavar="PATH",
+        help="Дублировать лог в файл. Полезно вместе с --tui, "
+             "когда stdout занят дашбордом.",
+    )
+    parser.add_argument(
+        "--healthz-stale-after", type=float, default=600.0,
+        metavar="SEC",
+        help="Сколько секунд без шар до того, как /healthz отдаёт degraded "
+             "(по умолчанию: 600).",
+    )
     return parser.parse_args()
+
+
+def _setup_logging_for_tui(log_file: str | None, tui_active: bool) -> None:
+    """Логи + curses несовместимы: stdout-handler рвёт перерисовку. Если TUI
+    включён — поднимаем уровень до WARNING на консоли, а INFO направляем в
+    файл (если задан --log-file). Без TUI — поведение прежнее, basicConfig.
+    """
+    if not tui_active:
+        setup_logging()
+        if log_file:
+            fh = logging.FileHandler(log_file, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+            logging.getLogger().addHandler(fh)
+        return
+
+    # TUI режим: убираем default handlers basicConfig, добавляем тихий console
+    # на WARNING+ и файл (если задан) на INFO.
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.setLevel(logging.INFO)
+
+    console = logging.StreamHandler(sys.stderr)
+    console.setLevel(logging.WARNING)
+    console.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    root.addHandler(console)
+
+    if log_file:
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        root.addHandler(fh)
+
+
+def _format_stats_message(snap) -> str:
+    """Сборка ответа на /stats для Telegram."""
+    return (
+        "📊 Hope-Hash stats\n"
+        f"uptime: {format_uptime(snap.uptime_s)}\n"
+        f"hashrate (EMA): {format_rate(snap.hashrate_ema)}\n"
+        f"workers: {snap.workers}\n"
+        f"pool diff: {snap.pool_difficulty}\n"
+        f"shares: {snap.shares_total} sent / "
+        f"{snap.shares_accepted} ok / {snap.shares_rejected} rej\n"
+        f"job: {snap.current_job_id or '—'}"
+    )
 
 
 def main():
@@ -88,9 +160,26 @@ def main():
     # пытаться повторно стартовать main() и упасть.
     multiprocessing.freeze_support()
 
-    setup_logging()
     args = _parse_args()
     n_workers = max(1, args.workers)
+
+    # TUI работает только в реальном майнинге; для bench/demo просто игнорируем.
+    tui_requested = bool(getattr(args, "tui", False)) and not (args.benchmark or args.demo)
+    tui_active = tui_requested and is_curses_available()
+    if tui_requested and not tui_active:
+        # Лог через basicConfig (он ниже в setup), а пока просто print —
+        # пользователь должен это увидеть до тишины TUI-режима.
+        print(
+            "warning: --tui запрошен, но curses недоступен в этом Python "
+            "(на Windows нужен пакет windows-curses). Майнер продолжит без TUI.",
+            file=sys.stderr,
+        )
+
+    _setup_logging_for_tui(args.log_file, tui_active)
+
+    if not args.no_banner and not tui_active:
+        # В TUI-режиме баннер ломает curses-кадр; пропускаем.
+        print_banner()
 
     if args.benchmark and args.demo:
         print("error: --benchmark и --demo взаимоисключающи", file=sys.stderr)
@@ -141,26 +230,101 @@ def main():
     else:
         session_id = None
 
+    # ─── stats provider, TUI и healthz ───
+    pool_url = f"{POOL_HOST}:{POOL_PORT}"
+    stats_provider = StatsProvider(pool_url=pool_url)
+
     # ─── сетевая часть и mine() ───
     stop = threading.Event()
+    restart_event = threading.Event()
     client = StratumClient(POOL_HOST, POOL_PORT, args.btc_address, args.worker_name,
                            stop_event=stop, suggest_diff=args.suggest_diff)
 
     # Сетевая часть живёт в отдельной нити-супервизоре: она держит коннект,
     # переподключается при разрывах и сама поднимает reader_loop. main thread
     # отдан под mine(), чтобы Ctrl+C ловился предсказуемо.
-    supervisor = threading.Thread(target=supervisor_loop, args=(client,),
+    supervisor = threading.Thread(target=supervisor_loop, args=(client, restart_event),
                                   name="stratum-supervisor", daemon=False)
     supervisor.start()
+
+    # Healthz: знаем, что reader жив, если supervisor поднял текущий коннект.
+    # Свежий timestamp хешрейта храним сами через wrap-callable.
+    started_at = time.time()
+    last_hashrate_ts: dict[str, float | None] = {"ts": None}
+
+    def _bump_hashrate_ts() -> None:
+        last_hashrate_ts["ts"] = time.time()
+
+    if metrics_server is not None:
+        def _health_provider() -> dict:
+            snap = stats_provider.snapshot()
+            # reader_alive: считаем sock != None как «коннект жив» — это
+            # не идеально (между connect и subscribe он уже не None),
+            # но достаточно для liveness-зонда.
+            reader_alive = client.sock is not None and supervisor.is_alive()
+            return build_health_snapshot(
+                reader_alive=reader_alive,
+                hashrate_ema=snap.hashrate_ema,
+                hashrate_ts=last_hashrate_ts["ts"],
+                last_share_ts=snap.last_share_ts,
+                started_at=started_at,
+                stale_after_s=args.healthz_stale_after,
+            )
+        metrics_server.set_health_provider(_health_provider)
+
+    # TUI поднимаем сразу — он покажет «жду первый job».
+    tui_app: TUIApp | None = None
+    if tui_active:
+        tui_app = TUIApp(stats_provider, stop_event=stop)
+        tui_app.start()
+
+    # ─── Telegram inbound (опционально) ───
+    if notifier.enabled and TelegramNotifier.inbound_enabled_in_env():
+        def _on_stats() -> str:
+            return _format_stats_message(stats_provider.snapshot())
+
+        def _on_stop() -> str:
+            logger.info("[tg] /stop принят, выставляю stop_event")
+            stop.set()
+            client.close()
+            return "🛑 stop_event установлен, майнер останавливается"
+
+        def _on_restart() -> str:
+            logger.info("[tg] /restart принят, выставляю restart_event")
+            restart_event.set()
+            client.close()
+            return "♻️ restart-сигнал отправлен"
+
+        def _on_help() -> str:
+            return "Доступные команды: /stats /stop /restart /help"
+
+        notifier.register_command("/stats", _on_stats)
+        notifier.register_command("/stop", _on_stop)
+        notifier.register_command("/restart", _on_restart)
+        notifier.register_command("/help", _on_help)
+        notifier.register_command("/start", _on_help)
+        notifier.start_inbound()
 
     logger.info(f"[main] жду первый job от пула... (воркеров: {n_workers})")
     while client.current_job is None and not stop.is_set():
         time.sleep(0.1)
 
+    # Оборачиваем mine() так, чтобы успевать обновлять last_hashrate_ts:
+    # внутри mine() уже идут update_hashrate-ы, но timestamp нужен снаружи
+    # (для healthz). Делаем это через monkey-патч update_hashrate.
+    _orig_update = stats_provider.update_hashrate
+
+    def _wrapped_update(ema: float, last_sample: float, workers: int) -> None:
+        _orig_update(ema, last_sample, workers)
+        _bump_hashrate_ts()
+
+    stats_provider.update_hashrate = _wrapped_update  # type: ignore[method-assign]
+
     try:
         if not stop.is_set():
             mine(client, stop, n_workers=n_workers,
-                 store=store, metrics=metrics, notifier=notifier)
+                 store=store, metrics=metrics, notifier=notifier,
+                 stats_provider=stats_provider)
     except KeyboardInterrupt:
         logger.info("[main] остановка по Ctrl+C")
     finally:
@@ -168,6 +332,8 @@ def main():
         # → join всех нитей. Никаких висячих daemon'ов.
         stop.set()
         client.close()
+        if tui_app is not None:
+            tui_app.stop()
         supervisor.join(timeout=5)
         if supervisor.is_alive():
             logger.warning("[main] supervisor не остановился за 5с")

@@ -1,28 +1,36 @@
 """Stratum V1 клиент: TCP-сокет, JSON line-delimited, обработка mining.* сообщений."""
 
+from __future__ import annotations
+
 import json
 import socket
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from ._logging import logger
 
 
 class StratumClient:
-    def __init__(self, host: str, port: int, btc_address: str, worker_name: str = "py01",
-                 stop_event: Optional[threading.Event] = None,
-                 suggest_diff: Optional[float] = None) -> None:
-        self.host = host
-        self.port = port
-        self.username = f"{btc_address}.{worker_name}"
-        self.sock = None
-        self.buf = b""
-        self.req_id = 0
-        self.extranonce1 = ""
-        self.extranonce2_size = 0
-        self.difficulty = 1.0
-        self.current_job = None
-        self.job_lock = threading.Lock()
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        btc_address: str,
+        worker_name: str = "py01",
+        stop_event: Optional[threading.Event] = None,
+        suggest_diff: Optional[float] = None,
+    ) -> None:
+        self.host: str = host
+        self.port: int = port
+        self.username: str = f"{btc_address}.{worker_name}"
+        self.sock: Optional[socket.socket] = None
+        self.buf: bytes = b""
+        self.req_id: int = 0
+        self.extranonce1: str = ""
+        self.extranonce2_size: int = 0
+        self.difficulty: float = 1.0
+        self.current_job: Optional[dict[str, Any]] = None
+        self.job_lock: threading.Lock = threading.Lock()
         # Общий флаг остановки: даёт reader_loop и mine() согласованно завершаться,
         # чтобы при ошибке в одной нити вторая не «висла» молча.
         self.stop_event = stop_event if stop_event is not None else threading.Event()
@@ -41,7 +49,7 @@ class StratumClient:
         self.sock = socket.create_connection((self.host, self.port), timeout=30)
         logger.info(f"[net] подключён к {self.host}:{self.port}")
 
-    def _send(self, method: str, params: list) -> int:
+    def _send(self, method: str, params: list[Any]) -> int:
         if self.sock is None:
             raise OSError("сокет не подключён")
         self.req_id += 1
@@ -89,7 +97,7 @@ class StratumClient:
         if self.suggest_diff is not None:
             self.suggest_difficulty(self.suggest_diff)
 
-    def _handle_message(self, msg: dict) -> None:
+    def _handle_message(self, msg: dict[str, Any]) -> None:
         method = msg.get("method")
         params = msg.get("params", []) or []
 

@@ -1,16 +1,35 @@
 """Prometheus-совместимые метрики через stdlib http.server. Без зависимостей.
 
 Два класса: ``Metrics`` — потокобезопасный регистр counter/gauge,
-``MetricsServer`` — HTTP-сервер ``/metrics`` на фоновой нити. Логгер
-берём по имени пакета, чтобы не плодить циклических импортов.
+``MetricsServer`` — HTTP-сервер ``/metrics`` + ``/healthz`` на фоновой
+нити. Логгер берём по имени пакета, чтобы не плодить циклических импортов.
+
+``/healthz`` отдаёт JSON ``{status, uptime_s, last_share_ts, ...}``. Источник
+правды — callable, который владелец сервера ставит через
+``set_health_provider()``. Семантика статусов:
+
+- ``ok`` (HTTP 200) — всё штатно: reader_loop жив, EMA>0 за последние 30с,
+  последний шар не древнее ``stale_after_s`` секунд.
+- ``degraded`` (HTTP 200) — что-то одно подвыпало (нет шар давно, EMA=0).
+  Liveness-зонд считает узел живым.
+- ``down`` (HTTP 503) — reader не жив или провайдер не зарегистрирован —
+  readiness-зонд должен вырубить трафик.
 """
 
+from __future__ import annotations
+
+import json
 import logging
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Callable, Optional
 
 logger = logging.getLogger("hope_hash")
+
+# Тип health-провайдера: callable без аргументов, возвращает dict-снапшот.
+# Возвращаемое поле ``status`` обязательно (один из "ok"/"degraded"/"down").
+HealthProvider = Callable[[], dict]
 
 
 # Допустимые символы для имени метрики по Prometheus naming convention:
@@ -112,17 +131,57 @@ class Metrics:
         return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def _make_handler(metrics: Metrics) -> type[BaseHTTPRequestHandler]:
-    """Фабрика handler-класса с ``metrics`` через замыкание — без глобалов."""
+def _make_handler(
+    metrics: Metrics,
+    health_provider_ref: list[Optional[HealthProvider]],
+) -> type[BaseHTTPRequestHandler]:
+    """Фабрика handler-класса с ``metrics`` через замыкание — без глобалов.
+
+    ``health_provider_ref`` — однослотовый список (mutable container),
+    чтобы ``MetricsServer.set_health_provider()`` мог поменять провайдер
+    после старта сервера, не пересоздавая handler-класс.
+    """
 
     class _Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 — имя задано базовым классом
-            if self.path != "/metrics":
-                self.send_error(404)
+            if self.path == "/metrics":
+                body = metrics.render()
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type", "text/plain; version=0.0.4; charset=utf-8"
+                )
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
-            body = metrics.render()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+            if self.path == "/healthz":
+                self._serve_healthz(health_provider_ref[0])
+                return
+
+            self.send_error(404)
+
+        def _serve_healthz(self, provider: Optional[HealthProvider]) -> None:
+            if provider is None:
+                # Сервер запущен, но никто не зарегистрировал источник
+                # health-данных → читать состояние нечем, считаем down.
+                payload = {"status": "down", "reason": "no health provider registered"}
+                http_status = 503
+            else:
+                try:
+                    payload = provider() or {}
+                except Exception as exc:  # provider — пользовательский код
+                    payload = {"status": "down", "reason": f"provider error: {exc}"}
+                    http_status = 503
+                else:
+                    status = payload.get("status", "down")
+                    # 503 только на полное «лежу»; degraded — это всё ещё 200
+                    # (k8s liveness не должен убивать пере-перезагружающийся узел).
+                    http_status = 503 if status == "down" else 200
+
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(http_status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -147,6 +206,18 @@ class MetricsServer:
         self._thread: threading.Thread | None = None
         # Лок защищает start/stop от гонки, если их зовут из разных нитей.
         self._lifecycle_lock = threading.Lock()
+        # Однослотовый mutable container: handler читает [0] на каждом запросе,
+        # а set_health_provider() обновляет [0]. Так провайдер можно
+        # подменить и после start(), без пересоздания handler-класса.
+        self._health_ref: list[Optional[HealthProvider]] = [None]
+
+    def set_health_provider(self, provider: Optional[HealthProvider]) -> None:
+        """Регистрирует callable, отдающий dict для ``/healthz``.
+
+        Можно вызывать до или после ``start()``. ``None`` — сброс
+        (полезно в тестах, чтобы вернуть статус ``down``).
+        """
+        self._health_ref[0] = provider
 
     def start(self) -> None:
         """Запускает сервер в фоновой нити. Идемпотентен."""
@@ -155,7 +226,7 @@ class MetricsServer:
                 # Уже запущен — ничего не делаем, чтобы не порвать рабочий
                 # сокет повторным bind'ом.
                 return
-            handler_cls = _make_handler(self.metrics)
+            handler_cls = _make_handler(self.metrics, self._health_ref)
             self._server = ThreadingHTTPServer((self.host, self.port), handler_cls)
             self._thread = threading.Thread(
                 target=self._server.serve_forever,
@@ -186,3 +257,68 @@ class MetricsServer:
     @property
     def url(self) -> str:
         return f"http://{self.host}:{self.port}/metrics"
+
+    @property
+    def health_url(self) -> str:
+        return f"http://{self.host}:{self.port}/healthz"
+
+
+def build_health_snapshot(
+    *,
+    reader_alive: bool,
+    hashrate_ema: float,
+    hashrate_ts: Optional[float],
+    last_share_ts: Optional[float],
+    started_at: float,
+    stale_after_s: float = 600.0,
+    hashrate_window_s: float = 30.0,
+    now: Optional[float] = None,
+) -> dict:
+    """Чистая функция: считает status из набора параметров.
+
+    Вынесена сюда (а не в miner.py), чтобы быть тестируемой без сети
+    и multiprocessing. ``now`` опционален — для детерминистичных тестов.
+    """
+    t = now if now is not None else time.time()
+
+    # 1. Reader жив? Без него мы пилим невалидный job — это down.
+    if not reader_alive:
+        return {
+            "status": "down",
+            "reason": "stratum reader thread is not alive",
+            "uptime_s": max(0.0, t - started_at),
+            "last_share_ts": last_share_ts,
+        }
+
+    # 2. EMA-сэмпл свежий и положительный?
+    fresh_hashrate = (
+        hashrate_ts is not None
+        and (t - hashrate_ts) <= hashrate_window_s
+        and hashrate_ema > 0
+    )
+
+    # 3. Был ли шар за окно stale_after_s?
+    fresh_share = (
+        last_share_ts is not None
+        and (t - last_share_ts) <= stale_after_s
+    )
+
+    if fresh_hashrate and (fresh_share or last_share_ts is None and t - started_at < stale_after_s):
+        # Только что стартанули и шар ещё не нашли — это нормально, не degraded.
+        status = "ok"
+        reason = None
+    elif fresh_hashrate:
+        status = "degraded"
+        reason = "no recent share"
+    else:
+        status = "degraded"
+        reason = "stale or zero hashrate"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "uptime_s": max(0.0, t - started_at),
+        "hashrate_ema": float(hashrate_ema),
+        "hashrate_ts": hashrate_ts,
+        "last_share_ts": last_share_ts,
+    }
