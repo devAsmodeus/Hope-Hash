@@ -64,13 +64,23 @@ def _format_rate(rate: float) -> str:
     return f"{rate / 1_000_000:.2f} MH/s"
 
 
-def run_benchmark(duration_s: float = 10.0, n_workers: int = 1) -> BenchResult:
+def run_benchmark(
+    duration_s: float = 10.0,
+    n_workers: int = 1,
+    sha_backend: str = "hashlib",
+    print_header: bool = True,
+) -> BenchResult:
     """Один прогон бенчмарка. Не делает сетевых вызовов и не находит шары.
 
     Параметры:
-        duration_s — сколько секунд хешировать. Меньше 1 нет смысла —
-                     накладные расходы на spawn доминируют.
-        n_workers  — число процессов-воркеров (как в реальном майнинге).
+        duration_s   — сколько секунд хешировать. Меньше 1 нет смысла —
+                       накладные расходы на spawn доминируют.
+        n_workers    — число процессов-воркеров (как в реальном майнинге).
+        sha_backend  — ``"hashlib"`` (mid-state) или ``"ctypes"``
+                       (libcrypto через EVP, без mid-state).
+        print_header — печатать ли preamble (platform/python/cpu).
+                       В режиме ``--backends`` мы вызываем run_benchmark
+                       несколько раз и печатаем header только один раз.
     """
     n_workers = max(1, int(n_workers))
     duration_s = max(0.1, float(duration_s))
@@ -78,20 +88,21 @@ def run_benchmark(duration_s: float = 10.0, n_workers: int = 1) -> BenchResult:
     target = 0  # никакой хеш не пройдёт → воркеры хешируют без выходов
     extranonce2 = "00000000"
 
-    logger.info(f"[bench] platform: {platform.platform()}")
-    logger.info(
-        f"[bench] python:   {platform.python_version()} "
-        f"({sys.implementation.name})"
-    )
-    logger.info(
-        f"[bench] cpu:      {multiprocessing.cpu_count()} logical cores"
-        f"{f' ({platform.processor()})' if platform.processor() else ''}"
-    )
-    logger.info(f"[bench] workers:  {n_workers}, duration: {duration_s:.1f}s")
+    if print_header:
+        logger.info(f"[bench] platform: {platform.platform()}")
+        logger.info(
+            f"[bench] python:   {platform.python_version()} "
+            f"({sys.implementation.name})"
+        )
+        logger.info(
+            f"[bench] cpu:      {multiprocessing.cpu_count()} logical cores"
+            f"{f' ({platform.processor()})' if platform.processor() else ''}"
+        )
+    logger.info(f"[bench] workers:  {n_workers}, duration: {duration_s:.1f}s, backend: {sha_backend}")
     logger.info(f"[bench] running...")
 
     processes, found_queue, hashes_counter, mp_stop = start_pool(
-        n_workers, header_base, target, extranonce2,
+        n_workers, header_base, target, extranonce2, sha_backend=sha_backend,
     )
 
     start = time.perf_counter()
@@ -140,3 +151,73 @@ def run_benchmark(duration_s: float = 10.0, n_workers: int = 1) -> BenchResult:
         total_hashes=total,
         hashrate_hps=hashrate,
     )
+
+
+def available_backends() -> list[str]:
+    """Список backend'ов, запускаемых ``--benchmark --backends``.
+
+    ``hashlib`` всегда доступен (stdlib). ``ctypes`` — только если
+    libcrypto загрузился. Порядок: сначала hashlib (baseline), потом
+    ctypes (для сравнения «во сколько раз быстрее»).
+    """
+    backends = ["hashlib"]
+    from . import sha_native
+    if sha_native.is_available():
+        backends.append("ctypes")
+    return backends
+
+
+def run_benchmark_all_backends(
+    duration_s: float = 10.0,
+    n_workers: int = 1,
+) -> dict[str, BenchResult]:
+    """Прогоняет бенчмарк по всем доступным backend'ам и печатает сравнение.
+
+    Возвращает dict ``backend_name -> BenchResult``. Печатает финальную
+    строку вида ``[bench] result: ctypes 1.42 MH/s (1.85x vs hashlib)``,
+    которую парсят docs/CI.
+    """
+    backends = available_backends()
+    results: dict[str, BenchResult] = {}
+    for i, backend in enumerate(backends):
+        # Header (platform/python/cpu) печатаем только в первом прогоне.
+        results[backend] = run_benchmark(
+            duration_s=duration_s, n_workers=n_workers,
+            sha_backend=backend, print_header=(i == 0),
+        )
+        logger.info(f"[bench]")
+
+    if not results:
+        return results
+
+    # Сводка: baseline = hashlib (всегда есть). Если есть только hashlib —
+    # просто его число. Если есть ctypes — ratio относительно hashlib.
+    baseline_name = "hashlib"
+    baseline = results.get(baseline_name)
+    logger.info(f"[bench] === backend comparison ===")
+    for name, res in results.items():
+        if baseline is not None and baseline.hashrate_hps > 0 and name != baseline_name:
+            ratio = res.hashrate_hps / baseline.hashrate_hps
+            logger.info(
+                f"[bench]   {name:<10} {_format_rate(res.hashrate_hps):>14}  "
+                f"({ratio:.2f}x vs {baseline_name})"
+            )
+        else:
+            logger.info(
+                f"[bench]   {name:<10} {_format_rate(res.hashrate_hps):>14}"
+            )
+
+    # Last line, легко парсится.
+    if "ctypes" in results and baseline is not None and baseline.hashrate_hps > 0:
+        ratio = results["ctypes"].hashrate_hps / baseline.hashrate_hps
+        logger.info(
+            f"[bench] result: ctypes {_format_rate(results['ctypes'].hashrate_hps)} "
+            f"({ratio:.2f}x vs hashlib-midstate)"
+        )
+    else:
+        logger.info(
+            f"[bench] result: hashlib-midstate {_format_rate(baseline.hashrate_hps)} "
+            f"(ctypes недоступен)"
+        )
+
+    return results

@@ -37,6 +37,7 @@ def worker(
     found_queue: "mp.Queue",
     hashes_counter: "mp.sharedctypes.Synchronized",
     stop_event: "mp.synchronize.Event",
+    sha_backend: str = "hashlib",
 ) -> None:
     """
     Перебирает nonce в диапазоне [nonce_start, nonce_end), считает SHA256d.
@@ -48,13 +49,51 @@ def worker(
 
     Сам ``submit`` делается из main process — здесь только находка.
     Сигнатура полностью pickle-able: bytes/int/str + примитивы mp.
+
+    ``sha_backend`` управляет, чем хешировать:
+      - ``"hashlib"`` (default) — mid-state оптимизация через ``hashlib.copy()``.
+        Это hot path, проверенный на реальных блоках.
+      - ``"ctypes"`` — каждая итерация = ``sha256d(header_base+nonce_le)``
+        через libcrypto. Без mid-state. Используется для бенчмарка.
+        Если libcrypto не загрузился, прозрачно падаем на hashlib.
     """
-    # Mid-state оптимизация: block header = 80 байт = 64 + 16.
-    # SHA-256 обрабатывает данные блоками по 64 байта, поэтому первые 64 байта
-    # header_base (version + prevhash + merkle_root[:28]) — константа в пределах
-    # одного nonce-цикла. Вычисляем SHA-256 mid-state один раз, а в горячем
-    # цикле делаем только copy() + дохэшируем оставшиеся 16 байт.
-    # Экономия: ~половина первого SHA-256-прохода на каждый nonce.
+    if sha_backend == "ctypes":
+        from . import sha_native
+        if sha_native.is_available():
+            _worker_ctypes(
+                header_base, target, nonce_start, nonce_end, extranonce2,
+                found_queue, hashes_counter, stop_event, sha_native.sha256d,
+            )
+            return
+        # libcrypto не нашёлся в воркере (на нестандартной машине) —
+        # тихо переключаемся на hashlib, чтобы майнер не падал.
+        # Логируем в воркер-процессе один раз через логгер пакета.
+        logger.warning("[sha] worker: ctypes недоступен, fallback hashlib")
+
+    _worker_hashlib_midstate(
+        header_base, target, nonce_start, nonce_end, extranonce2,
+        found_queue, hashes_counter, stop_event,
+    )
+
+
+def _worker_hashlib_midstate(
+    header_base: bytes,
+    target: int,
+    nonce_start: int,
+    nonce_end: int,
+    extranonce2: str,
+    found_queue: "mp.Queue",
+    hashes_counter: "mp.sharedctypes.Synchronized",
+    stop_event: "mp.synchronize.Event",
+) -> None:
+    """Hot path: mid-state SHA-256 через ``hashlib.copy()``.
+
+    Block header = 80 байт = 64 + 16. SHA-256 обрабатывает данные блоками
+    по 64 байта, поэтому первые 64 байта header_base — константа в пределах
+    одного nonce-цикла. Вычисляем SHA-256 mid-state один раз, а в горячем
+    цикле делаем только copy() + дохэшируем оставшиеся 16 байт.
+    Экономия: ~половина первого SHA-256-прохода на каждый nonce.
+    """
     inner_mid = hashlib.sha256()
     inner_mid.update(header_base[:64])
     tail_prefix = header_base[64:]   # 12 байт: merkle_root[28:] + ntime + nbits
@@ -95,6 +134,50 @@ def worker(
                 hashes_counter.value += local_hashes
 
 
+def _worker_ctypes(
+    header_base: bytes,
+    target: int,
+    nonce_start: int,
+    nonce_end: int,
+    extranonce2: str,
+    found_queue: "mp.Queue",
+    hashes_counter: "mp.sharedctypes.Synchronized",
+    stop_event: "mp.synchronize.Event",
+    sha256d,
+) -> None:
+    """ctypes-backend: ``sha256d(header_base + nonce_le)`` каждую итерацию.
+
+    Без mid-state — это сознательная плата за честный замер скорости
+    нативного backend. Если хочется полной производительности — оставляйте
+    backend hashlib (mid-state даёт ~2x).
+    """
+    local_hashes = 0
+    nonce = nonce_start
+    try:
+        while nonce < nonce_end:
+            buf = header_base + struct.pack("<I", nonce)
+            h = sha256d(buf)
+            h_int = int.from_bytes(h[::-1], "big")
+            if h_int <= target:
+                nonce_hex = struct.pack(">I", nonce).hex()
+                hash_hex = h[::-1].hex()
+                found_queue.put((nonce_hex, hash_hex, extranonce2))
+
+            nonce += 1
+            local_hashes += 1
+
+            if local_hashes >= HASHES_PER_TICK:
+                with hashes_counter.get_lock():
+                    hashes_counter.value += local_hashes
+                local_hashes = 0
+                if stop_event.is_set():
+                    return
+    finally:
+        if local_hashes:
+            with hashes_counter.get_lock():
+                hashes_counter.value += local_hashes
+
+
 # ─────────────────────── оркестрация пула ───────────────────────
 
 
@@ -103,6 +186,7 @@ def start_pool(
     header_base: bytes,
     target: int,
     extranonce2: str,
+    sha_backend: str = "hashlib",
 ) -> tuple:
     """
     Поднимает ``n_workers`` процессов, делящих [0, 2^32) поровну.
@@ -110,6 +194,9 @@ def start_pool(
     Возвращает кортеж ``(processes, found_queue, hashes_counter, stop_event)``.
     Все объекты IPC создаются здесь, чтобы main process был их единственным
     владельцем — это упрощает корректный teardown в ``stop_pool``.
+
+    ``sha_backend`` пробрасывается в воркер: ``"hashlib"`` (mid-state)
+    или ``"ctypes"`` (libcrypto через EVP). См. ``worker()``.
     """
     n_workers = max(1, int(n_workers))
     nonce_space = 1 << 32
@@ -130,6 +217,7 @@ def start_pool(
             args=(
                 i, header_base, target, nonce_start, nonce_end,
                 extranonce2, found_queue, hashes_counter, stop_event,
+                sha_backend,
             ),
             daemon=False,
         )
@@ -138,7 +226,7 @@ def start_pool(
 
     logger.info(
         f"[pool] стартовал {n_workers} воркер(ов), "
-        f"шаг nonce-пространства = {step:#x}"
+        f"шаг nonce-пространства = {step:#x}, sha_backend={sha_backend}"
     )
     return processes, found_queue, hashes_counter, stop_event
 
