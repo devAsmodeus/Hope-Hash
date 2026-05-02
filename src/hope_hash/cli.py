@@ -21,6 +21,7 @@ from .pools import PoolList, parse_pool_spec
 from .storage import ShareStore
 from .stratum import StratumClient
 from .tui import StatsProvider, TUIApp, format_rate, format_uptime, is_curses_available
+from .webui import WebUIServer
 
 
 POOL_HOST = "solo.ckpool.org"
@@ -58,6 +59,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metrics-port", type=int, default=9090,
         help="Порт Prometheus /metrics (по умолчанию: 9090, 0 — отключить).",
+    )
+    parser.add_argument(
+        "--web-port", type=int, default=0,
+        help="Порт web-дашборда (HTML + /api/stats + SSE /api/events). "
+             "По умолчанию 0 (выключен). Слушает только loopback.",
+    )
+    parser.add_argument(
+        "--web-host", type=str, default="127.0.0.1",
+        help="Хост для web-дашборда (по умолчанию: 127.0.0.1). "
+             "Под наружу — только за reverse-proxy с auth.",
     )
     parser.add_argument(
         "--suggest-diff", type=float, default=None,
@@ -324,8 +335,11 @@ def main():
     else:
         session_id = None
 
-    # ─── stats provider, TUI и healthz ───
-    stats_provider = StatsProvider(pool_url=pool_list.current_url())
+    # ─── stats provider, TUI, web и healthz ───
+    stats_provider = StatsProvider(
+        pool_url=pool_list.current_url(),
+        sha_backend=sha_backend,
+    )
 
     # ─── сетевая часть и mine() ───
     stop = threading.Event()
@@ -378,22 +392,30 @@ def main():
     def _bump_hashrate_ts() -> None:
         last_hashrate_ts["ts"] = time.time()
 
+    def _health_provider() -> dict:
+        snap = stats_provider.snapshot()
+        # reader_alive: считаем sock != None как «коннект жив» — это
+        # не идеально (между connect и subscribe он уже не None),
+        # но достаточно для liveness-зонда.
+        reader_alive = client.sock is not None and supervisor.is_alive()
+        return build_health_snapshot(
+            reader_alive=reader_alive,
+            hashrate_ema=snap.hashrate_ema,
+            hashrate_ts=last_hashrate_ts["ts"],
+            last_share_ts=snap.last_share_ts,
+            started_at=started_at,
+            stale_after_s=args.healthz_stale_after,
+        )
+
     if metrics_server is not None:
-        def _health_provider() -> dict:
-            snap = stats_provider.snapshot()
-            # reader_alive: считаем sock != None как «коннект жив» — это
-            # не идеально (между connect и subscribe он уже не None),
-            # но достаточно для liveness-зонда.
-            reader_alive = client.sock is not None and supervisor.is_alive()
-            return build_health_snapshot(
-                reader_alive=reader_alive,
-                hashrate_ema=snap.hashrate_ema,
-                hashrate_ts=last_hashrate_ts["ts"],
-                last_share_ts=snap.last_share_ts,
-                started_at=started_at,
-                stale_after_s=args.healthz_stale_after,
-            )
         metrics_server.set_health_provider(_health_provider)
+
+    # ─── web-дашборд (опционально) ───
+    web_server: WebUIServer | None = None
+    if args.web_port > 0:
+        web_server = WebUIServer(stats_provider, host=args.web_host, port=args.web_port)
+        web_server.set_health_provider(_health_provider)
+        web_server.start()
 
     # TUI поднимаем сразу — он покажет «жду первый job».
     tui_app: TUIApp | None = None
@@ -465,6 +487,8 @@ def main():
         # Закрываем observers последними, чтобы дать им зафиксировать финальные события.
         notifier.notify_stopped()
         notifier.shutdown()
+        if web_server is not None:
+            web_server.stop()
         if metrics_server is not None:
             metrics_server.stop()
         if store is not None:
