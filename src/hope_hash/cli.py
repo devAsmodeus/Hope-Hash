@@ -17,6 +17,7 @@ from .banner import print_banner
 from .metrics import Metrics, MetricsServer, build_health_snapshot
 from .miner import mine, supervisor_loop
 from .notifier import TelegramNotifier
+from .pools import PoolList, parse_pool_spec
 from .storage import ShareStore
 from .stratum import StratumClient
 from .tui import StatsProvider, TUIApp, format_rate, format_uptime, is_curses_available
@@ -105,6 +106,53 @@ def _parse_args() -> argparse.Namespace:
         help="Сколько секунд без шар до того, как /healthz отдаёт degraded "
              "(по умолчанию: 600).",
     )
+    parser.add_argument(
+        "--pool", action="append", default=None, metavar="HOST:PORT",
+        help="Пул для подключения (можно указывать несколько раз для failover). "
+             "При провале текущего — supervisor ротирует на следующий. "
+             "По умолчанию: solo.ckpool.org:3333.",
+    )
+    parser.add_argument(
+        "--rotate-after-failures", type=int, default=3,
+        metavar="N",
+        help="Сколько подряд провалов на одном пуле до ротации (default 3).",
+    )
+    parser.add_argument(
+        "--sha-backend", choices=("auto", "hashlib", "ctypes"), default="auto",
+        help="SHA-256 backend для воркеров. auto = ctypes если libcrypto "
+             "загружается, иначе hashlib. По умолчанию: auto.",
+    )
+    parser.add_argument(
+        "--backends", action="store_true",
+        help="В режиме --benchmark прогнать все доступные backend'ы для "
+             "сравнения (hashlib mid-state vs ctypes без mid-state).",
+    )
+    parser.add_argument(
+        "--solo", action="store_true",
+        help="Solo-режим через getblocktemplate. Требует --rpc-url + "
+             "(--rpc-cookie ИЛИ --rpc-user/--rpc-pass).",
+    )
+    parser.add_argument(
+        "--rpc-url", type=str, default=None, metavar="URL",
+        help="JSON-RPC URL bitcoind (например http://127.0.0.1:8332).",
+    )
+    parser.add_argument(
+        "--rpc-cookie", type=str, default=None, metavar="PATH",
+        help="Путь к cookie-файлу bitcoind (обычно ~/.bitcoin/.cookie).",
+    )
+    parser.add_argument(
+        "--rpc-user", type=str, default=None, metavar="USER",
+        help="JSON-RPC пользователь (если cookie не используется).",
+    )
+    parser.add_argument(
+        "--rpc-pass", type=str, default=None, metavar="PASS",
+        help="JSON-RPC пароль (если cookie не используется).",
+    )
+    parser.add_argument(
+        "--solo-poll-sec", type=float, default=5.0,
+        metavar="SEC",
+        help="Период опроса getblocktemplate (default 5с).",
+    )
     return parser.parse_args()
 
 
@@ -138,6 +186,28 @@ def _setup_logging_for_tui(log_file: str | None, tui_active: bool) -> None:
         fh.setLevel(logging.INFO)
         fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         root.addHandler(fh)
+
+
+def _resolve_sha_backend(choice: str) -> str:
+    """``auto`` → ``ctypes`` если libcrypto загружается, иначе ``hashlib``.
+
+    Явный выбор пользователя пробрасывается без изменений; в воркере
+    ctypes-backend сам падает на hashlib, если libcrypto там не нашёлся
+    (актуально для multiprocessing-spawn на нестандартной машине).
+    """
+    if choice != "auto":
+        return choice
+    from . import sha_native
+    return "ctypes" if sha_native.is_available() else "hashlib"
+
+
+def _build_pool_list(args: argparse.Namespace) -> PoolList:
+    """Строит ``PoolList`` из --pool флагов (или дефолтного CKPool)."""
+    if args.pool:
+        endpoints = [parse_pool_spec(s) for s in args.pool]
+    else:
+        endpoints = [(POOL_HOST, POOL_PORT)]
+    return PoolList(endpoints, rotate_after_failures=args.rotate_after_failures)
 
 
 def _format_stats_message(snap) -> str:
@@ -185,9 +255,20 @@ def main():
         print("error: --benchmark и --demo взаимоисключающи", file=sys.stderr)
         sys.exit(2)
 
+    # ─── разрешаем sha_backend (нужен для bench и для mine) ───
+    sha_backend = _resolve_sha_backend(args.sha_backend)
+
     if args.benchmark:
-        from .bench import run_benchmark
-        run_benchmark(duration_s=args.bench_duration, n_workers=n_workers)
+        from .bench import run_benchmark, run_benchmark_all_backends
+        if args.backends:
+            run_benchmark_all_backends(
+                duration_s=args.bench_duration, n_workers=n_workers,
+            )
+        else:
+            run_benchmark(
+                duration_s=args.bench_duration, n_workers=n_workers,
+                sha_backend=sha_backend,
+            )
         return
 
     if args.demo:
@@ -208,6 +289,15 @@ def main():
         print(f"error: некорректный BTC-адрес '{args.btc_address}': {e}", file=sys.stderr)
         sys.exit(2)
 
+    if args.solo:
+        if not args.rpc_url:
+            print("error: --solo требует --rpc-url", file=sys.stderr)
+            sys.exit(2)
+        if not args.rpc_cookie and not (args.rpc_user and args.rpc_pass):
+            print("error: --solo требует --rpc-cookie ИЛИ --rpc-user/--rpc-pass",
+                  file=sys.stderr)
+            sys.exit(2)
+
     # ─── observers ───
     # Все три опциональны и не зависят друг от друга. Каждый сам решает,
     # включаться ли (notifier — по env vars; metrics — по порту; store — по флагу).
@@ -225,26 +315,59 @@ def main():
     notifier = TelegramNotifier.from_env()
     notifier.notify_started(args.btc_address, args.worker_name)
 
+    # ─── multi-pool failover ───
+    pool_list = _build_pool_list(args)
+    initial_host, initial_port = pool_list.current()
+
     if store is not None:
-        session_id = store.start_session(POOL_HOST, args.btc_address, args.worker_name)
+        session_id = store.start_session(initial_host, args.btc_address, args.worker_name)
     else:
         session_id = None
 
     # ─── stats provider, TUI и healthz ───
-    pool_url = f"{POOL_HOST}:{POOL_PORT}"
-    stats_provider = StatsProvider(pool_url=pool_url)
+    stats_provider = StatsProvider(pool_url=pool_list.current_url())
 
     # ─── сетевая часть и mine() ───
     stop = threading.Event()
     restart_event = threading.Event()
-    client = StratumClient(POOL_HOST, POOL_PORT, args.btc_address, args.worker_name,
-                           stop_event=stop, suggest_diff=args.suggest_diff)
+
+    if args.solo:
+        from .solo import BitcoinRPC, SoloClient
+        rpc = BitcoinRPC(
+            url=args.rpc_url,
+            cookie_path=Path(args.rpc_cookie) if args.rpc_cookie else None,
+            username=args.rpc_user,
+            password=args.rpc_pass,
+        )
+        client = SoloClient(
+            rpc=rpc,
+            btc_address=args.btc_address,
+            worker_name=args.worker_name,
+            stop_event=stop,
+            poll_interval_s=args.solo_poll_sec,
+        )
+        stats_provider.update_pool(f"solo:{args.rpc_url}")
+        # В solo-режиме pool_list игнорируется супервизором (нет смысла
+        # ротировать между bitcoind-инстансами).
+        supervisor = threading.Thread(
+            target=supervisor_loop,
+            args=(client, restart_event),
+            kwargs={"stats_provider": stats_provider},
+            name="solo-supervisor", daemon=False,
+        )
+    else:
+        client = StratumClient(initial_host, initial_port, args.btc_address, args.worker_name,
+                               stop_event=stop, suggest_diff=args.suggest_diff)
+        supervisor = threading.Thread(
+            target=supervisor_loop,
+            args=(client, restart_event),
+            kwargs={"pools": pool_list, "stats_provider": stats_provider},
+            name="stratum-supervisor", daemon=False,
+        )
 
     # Сетевая часть живёт в отдельной нити-супервизоре: она держит коннект,
     # переподключается при разрывах и сама поднимает reader_loop. main thread
     # отдан под mine(), чтобы Ctrl+C ловился предсказуемо.
-    supervisor = threading.Thread(target=supervisor_loop, args=(client, restart_event),
-                                  name="stratum-supervisor", daemon=False)
     supervisor.start()
 
     # Healthz: знаем, что reader жив, если supervisor поднял текущий коннект.
@@ -324,7 +447,8 @@ def main():
         if not stop.is_set():
             mine(client, stop, n_workers=n_workers,
                  store=store, metrics=metrics, notifier=notifier,
-                 stats_provider=stats_provider)
+                 stats_provider=stats_provider,
+                 sha_backend=sha_backend)
     except KeyboardInterrupt:
         logger.info("[main] остановка по Ctrl+C")
     finally:
