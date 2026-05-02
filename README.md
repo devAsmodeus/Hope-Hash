@@ -8,6 +8,19 @@
 
 ---
 
+## Что нового в v0.6.0
+
+Perf & resilience: **multi-pool failover** (`--pool host:port`
+повторяемый, ротация после N провалов на текущем), **solo-режим
+через `getblocktemplate`** (`--solo --rpc-url ... --rpc-cookie ...`,
+полная сборка coinbase + witness commitment + `submitblock` через
+JSON-RPC), **ctypes SHA-256 backend** (`--sha-backend
+{auto,hashlib,ctypes}`, грузит libcrypto через `ctypes.CDLL`,
+fallback на hashlib если не нашёлся), **`--benchmark --backends`** —
+сравнительный прогон всех доступных backend'ов с финальной строкой
+`[bench] result: ctypes X MH/s (Yx vs hashlib-midstate)`. Hot path
+не тронут, mid-state hashlib остаётся defaultом для майнинга.
+
 ## Что нового в v0.5.0
 
 Ops & UX полировка: `--tui` — curses-дашборд (EMA-хешрейт, шары,

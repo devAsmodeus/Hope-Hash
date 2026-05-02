@@ -59,13 +59,14 @@ TUI и команды Telegram — отложены.
 
 ### Производительность
 
-- [ ] **C-extension для SHA-256.** Через `cffi` или `ctypes` дёргать `EVP_DigestUpdate` из OpenSSL — даст 5–10× к хешрейту над pure-Python `hashlib`.
+- [x] **ctypes-обёртка над libcrypto SHA-256.** `sha_native.py` (v0.6.0): грузит `libcrypto-3.dll` / `libcrypto.so.3` / `/usr/lib/libcrypto.dylib` через `ctypes.CDLL`, EVP API. CLI `--sha-backend {auto,hashlib,ctypes}`. Без mid-state — для бенчмарка-сравнения. Hot path майнинга остался на hashlib mid-state, как самый быстрый вариант на pure-stdlib.
+- [ ] **SIMD/C-extension для SHA-256.** Дальнейшее ускорение требует SIMD (AVX2: 8 хешей параллельно). Это уже C-расширение, не stdlib — Уровень 3.
 - [ ] **SIMD-реализация SHA-256.** AVX2 (8 хешей параллельно) или AVX-512 (16). Можно взять готовое из репо `intel-ipsec-mb` или `sha-2-multihash`. Пишется как C-extension, дёргается из Python.
 - [x] **Mid-state кэширование.** `hashlib.sha256().copy()` после первых 64 байт — константа в рамках nonce-цикла. Реализовано в `parallel.worker` (v0.3.0). Прирост ≈×1.5–2, zero deps.
 
 ### Архитектура
 
-- [ ] **Множественные пулы с failover.** Список `pool1, pool2, pool3` в конфиге, при потере pool1 — переключение на pool2 без остановки воркеров.
+- [x] **Множественные пулы с failover.** `--pool host:port` повторяемый (v0.6.0). После N (default 3) подряд провалов на одном пуле supervisor ротирует на следующий, после полного круга применяется exponential backoff. `pools.PoolList` + `StratumClient.set_endpoint()`.
 - [ ] **Несколько воркеров на разных пулах одновременно.** Распределённая работа с разными адресами/именами.
 - [x] **Поддержка vardiff.** `mining.suggest_difficulty` после авторизации. CLI-флаг `--suggest-diff FLOAT`. Реализовано в `stratum.py` (v0.3.0).
 
@@ -91,7 +92,7 @@ TUI и команды Telegram — отложены.
 ### Протоколы
 
 - [ ] **Stratum V2.** Современный бинарный протокол с шифрованием (Noise) и job negotiation. У `solo.ckpool.org` его пока нет, но есть на других пулах. Хорошая возможность разобраться в современном крипто-протоколе.
-- [ ] **Прямое подключение к bitcoin-core.** Вообще без пула: запрашивать `getblocktemplate` через RPC у локальной ноды, собирать блок самостоятельно, при удаче — `submitblock`. Это и есть «настоящий соло-майнинг» без посредников.
+- [x] **Прямое подключение к bitcoin-core.** `solo.py` (v0.6.0): `--solo --rpc-url URL --rpc-cookie PATH`. Polling `getblocktemplate` каждые `--solo-poll-sec`, сборка coinbase (BIP-34 + BIP-141 witness commitment), `submitblock` через JSON-RPC. Учебное качество, шанс найти блок ≈ 0; цель — научить, как `getblocktemplate` устроен.
 
 ### Мониторинг и SRE
 

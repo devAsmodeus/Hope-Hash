@@ -7,6 +7,54 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-02
+
+### Добавлено
+- **Multi-pool failover** (`pools.py`): `--pool host:port` повторяемый.
+  При N (default 3) подряд провалах на одном пуле supervisor ротирует
+  на следующий. После полного круга без успехов применяется обычный
+  exponential backoff. `PoolList.full_cycle_failed()` отдаёт сигнал.
+  `StratumClient.set_endpoint(host, port)` — без пересоздания клиента,
+  локи и `on_share_result` сохраняются.
+- **Solo-режим через `getblocktemplate`** (`solo.py`): `hope-hash --solo
+  --rpc-url URL --rpc-cookie PATH` (или `--rpc-user/--rpc-pass`).
+  `SoloClient` имитирует поверхность `StratumClient`, чтобы `mine()`
+  работал без изменений. Polling `getblocktemplate` каждые
+  `--solo-poll-sec` (5с по умолчанию). На find — собирает coinbase
+  (BIP-34 height + extranonce), считает witness commitment (BIP-141)
+  если `default_witness_commitment` присутствует, сериализует полный
+  блок и шлёт `submitblock`. JSON-RPC через stdlib `urllib`.
+- **ctypes SHA-256 backend** (`sha_native.py`): `--sha-backend
+  {auto,hashlib,ctypes}` (default `auto`). Загружает `libcrypto-3.dll`
+  / `libcrypto.so.3` / `/usr/lib/libcrypto.dylib` через `ctypes.CDLL`,
+  вызывает EVP API. Без mid-state — для честного бенчмарка. Если
+  libcrypto не нашёлся, тихо fallback на `hashlib`.
+- **`--benchmark --backends`** (`bench.py`): прогоняет один и тот же
+  бенч по всем доступным backend'ам и печатает сравнение. Финальная
+  строка вида `[bench] result: ctypes 1.42 MH/s (1.85x vs hashlib-midstate)`.
+- **Тесты**: `test_pools.py` (24), `test_sha_native.py` (12),
+  `test_solo.py` (35, включая `FakeRPC`), `test_bench_backends.py` (9).
+  Итого 145 → 225 (+80).
+
+### Изменено
+- `supervisor_loop()` принимает опциональные `pools: PoolList` и
+  `stats_provider: StatsProvider`. Без них поведение прежнее.
+- `mine()` принимает `sha_backend: str` (default `"hashlib"`).
+- `start_pool()` пробрасывает `sha_backend` в каждый воркер.
+- `worker()` (parallel.py) рефакторен: `_worker_hashlib_midstate()`
+  (hot path, без изменений) и `_worker_ctypes()` (sha256d на каждой
+  итерации без mid-state).
+- `StatsProvider.update_pool(url)` — для отображения активного пула
+  в TUI после ротации.
+- `__version__` → `0.6.0`.
+
+### Производительность
+- Hot path (mid-state hashlib) не тронут — бенчмарк на 4-х воркерах
+  показал 3.18 MH/s (тот же порядок, что v0.5.0).
+- ctypes-backend без mid-state ожидаемо медленнее (~0.3x от hashlib
+  mid-state). Это сознательная плата за честный замер «голого»
+  Python→C overhead.
+
 ## [0.5.0] — 2026-05-02
 
 ### Добавлено
