@@ -7,6 +7,68 @@
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-02
+
+### Добавлено
+- **Web-дашборд** (`webui.py`): stdlib `http.server`, без CDN и без
+  JS-фреймворков. CLI-флаг `--web-port PORT` (0 — выкл, default 0) и
+  `--web-host HOST` (default `127.0.0.1`). Эндпоинты:
+  - `GET /` — single-page HTML с inline-SVG sparkline хешрейта (последние
+    60 сэмплов), карточками шар/job/pool/uptime/sha-backend и SSE-логом
+    последних событий.
+  - `GET /api/stats` — JSON-снапшот (`Cache-Control: no-store`).
+    Контракт: `hashrate_ema/last/human`, `workers`, `pool_url`/`current_pool`,
+    `pool_difficulty`, `current_job_id`, `shares_total/accepted/rejected`,
+    `last_share_ts`, `uptime_s/human`, `sha_backend`, `started_at`, `now`.
+  - `GET /api/events` — Server-Sent Events: `share_found`,
+    `share_accepted`, `share_rejected`, `job`, `pool`. Keep-alive
+    каждые 15с. Чистая отписка при разрыве клиента.
+  - `GET /healthz` — то же тело, что у metrics-сервера (через тот же
+    `set_health_provider`).
+- **`StatsProvider.subscribe(callback)`** — pub/sub шина для SSE.
+  `update_job` публикует `job`-event только при реальной смене job_id,
+  `record_share` — `share_found/accepted/rejected`, `update_pool` — `pool`.
+  Сломанный подписчик не валит publish: исключения ловятся и логируются.
+- **`StatsProvider.set_sha_backend(name)`** — backend-имя видно в
+  `/api/stats` и в TUI рядом с хешрейтом.
+- **Docker** (`Dockerfile`, `docker-compose.yml`, `.dockerignore`):
+  `python:3.11-slim`, healthcheck через stdlib `urllib` (без `curl`),
+  `ENTRYPOINT ["hope-hash"]`. Compose поднимает три сервиса
+  (`miner` + `prometheus` + `grafana`) с volume для SQLite и provisioning
+  Grafana. Env vars: `BTC_ADDRESS`, `WORKERS`, `HOPE_HASH_TELEGRAM_*`,
+  `GRAFANA_USER/PASSWORD`.
+- **Provisioning Prometheus + Grafana** (`deploy/prometheus/prometheus.yml`,
+  `deploy/grafana/datasource.yml`, `deploy/grafana/dashboard.yml`):
+  Prometheus скрейпит `miner:8000/metrics` каждые 15с, Grafana
+  автоматически подхватывает `hope-hash.json` под папку «Hope-Hash».
+- **Двуязычная документация** (`docs/`):
+  `getting-started.{en,ru}.md` (первый запуск, типичные проблемы),
+  `deploy.{en,ru}.md` (Docker compose, Telegram, healthcheck, reverse
+  proxy), `architecture.{en,ru}.md` (протокол, threading, hot path,
+  observers, BIP-ссылки).
+- **README rewrite**: верх — английский, низ — русский, обе половины
+  с одинаковыми разделами (что / install / run / advanced flags / demo /
+  benchmark / architecture / realistic expectations / contributing).
+  Cross-link на `docs/architecture.{en,ru}.md`.
+- **Тесты**: `test_webui.py` (17 тестов): publish/subscribe, render_html,
+  HTML/JSON-эндпоинты, SSE-стрим с реальным сокетом, `/healthz`-fallback,
+  идемпотентность start/stop. Итого **225 → 242** (+17).
+
+### Изменено
+- `StatsProvider.__init__` теперь принимает `sha_backend` (default
+  `"hashlib"`).
+- `StatsProvider.update_job/record_share/update_pool` публикуют события
+  через `_publish` — без обратных совместимых ломок (старые потребители
+  просто не подписываются).
+- `cli.main()` стартует `WebUIServer`, если `--web-port > 0`, и регистрирует
+  тот же health-provider, что и у `MetricsServer`.
+- `__version__` → `0.7.0`.
+
+### Документация
+- `ROADMAP.md`: тикнуты web-морда (через stdlib `http.server`, не
+  FastAPI) и Docker-образ. Добавлен раздел «remaining» с явно
+  отложенными задачами (Stratum V2, Rust/PyO3, GPU, FastAPI).
+
 ## [0.6.0] — 2026-05-02
 
 ### Добавлено

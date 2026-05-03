@@ -1,0 +1,16 @@
+# Минимальный Prometheus-конфиг для hope-hash.
+# Скрейпит /metrics майнера каждые 15с. Имя сервиса `miner` — из docker-compose.yml.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: hope-hash
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - miner:8000
+        labels:
+          service: hope-hash
+          env: docker

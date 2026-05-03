@@ -21,10 +21,11 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Callable, Optional
 
 
 # ─────────────────── Stats provider (без curses) ───────────────────
@@ -60,9 +61,18 @@ class StatsProvider:
     Намеренно plain-data, никакой бизнес-логики — она в ``mine()``.
     """
 
-    def __init__(self, pool_url: str = "") -> None:
+    def __init__(self, pool_url: str = "", sha_backend: str = "hashlib") -> None:
         self._lock = threading.Lock()
         self._snap = StatsSnapshot(pool_url=pool_url)
+        # SHA-backend имя; не часть StatsSnapshot, потому что не меняется в runtime,
+        # но web-дашборду удобно читать из одного места.
+        self._sha_backend = sha_backend
+        # Подписчики на события (share found/accepted/rejected, job change, pool rotation).
+        # Каждый callback — sync-функция (event_type: str, payload: dict). Вызывается
+        # из публикующей нити (mine/supervisor) под локом списка, поэтому
+        # обработчики ДОЛЖНЫ быть быстрыми и не блокировать (например, кладут в Queue).
+        self._subscribers: list[Callable[[str, dict[str, Any]], None]] = []
+        self._sub_lock = threading.Lock()
 
     def snapshot(self) -> StatsSnapshot:
         """Атомарный снимок текущего состояния."""
@@ -90,8 +100,15 @@ class StatsProvider:
 
     def update_job(self, job_id: Optional[str], pool_difficulty: float) -> None:
         with self._lock:
+            prev = self._snap.current_job_id
             self._snap.current_job_id = job_id
             self._snap.pool_difficulty = float(pool_difficulty)
+        # Событие job-change только при реальной смене (чтобы не флудить SSE
+        # на каждый пересчёт хешрейта).
+        if prev != job_id:
+            self._publish(
+                "job", {"job_id": job_id, "pool_difficulty": float(pool_difficulty)}
+            )
 
     def record_share(self, accepted: Optional[bool] = None) -> None:
         """Учёт шар. accepted=None → submitted (ещё ждём ответа пула).
@@ -100,10 +117,14 @@ class StatsProvider:
             if accepted is None:
                 self._snap.shares_total += 1
                 self._snap.last_share_ts = time.time()
+                event = "share_found"
             elif accepted:
                 self._snap.shares_accepted += 1
+                event = "share_accepted"
             else:
                 self._snap.shares_rejected += 1
+                event = "share_rejected"
+        self._publish(event, {"accepted": accepted})
 
     def update_pool(self, pool_url: str) -> None:
         """Меняет текущий pool URL (для multi-pool failover).
@@ -113,6 +134,70 @@ class StatsProvider:
         """
         with self._lock:
             self._snap.pool_url = str(pool_url)
+        self._publish("pool", {"pool_url": pool_url})
+
+    @property
+    def sha_backend(self) -> str:
+        """Имя текущего SHA-backend (для /api/stats и UI)."""
+        return self._sha_backend
+
+    def set_sha_backend(self, name: str) -> None:
+        """Меняет SHA-backend имя (вызывается один раз из cli.main)."""
+        self._sha_backend = str(name)
+
+    # ─── publish/subscribe для SSE (web дашборд) ───
+
+    def subscribe(
+        self, callback: Callable[[str, dict[str, Any]], None]
+    ) -> Callable[[], None]:
+        """Подписка на события майнера.
+
+        Возвращает функцию-отписку. Callback дёргается синхронно из
+        публикующей нити, поэтому должен быть мгновенным (в идеале —
+        ``queue.put_nowait``). Любые исключения внутри callback ловятся
+        и логируются как warning, чтобы один сломанный подписчик не
+        ронял publish для остальных.
+        """
+        with self._sub_lock:
+            self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            with self._sub_lock:
+                try:
+                    self._subscribers.remove(callback)
+                except ValueError:
+                    # Уже удалён — идемпотентно
+                    pass
+
+        return _unsubscribe
+
+    def _publish(self, event_type: str, payload: dict[str, Any]) -> None:
+        """Внутренний publish — рассылает событие всем подписчикам.
+
+        Снимок списка под локом, потом вызовы без удержания лока, чтобы
+        подписчик мог при желании отписаться внутри своего callback.
+        """
+        with self._sub_lock:
+            subs = list(self._subscribers)
+        if not subs:
+            return
+        for cb in subs:
+            try:
+                cb(event_type, payload)
+            except Exception as exc:  # noqa: BLE001 — пользовательский callback
+                logging.getLogger("hope_hash").warning(
+                    "[stats] подписчик упал на событии %s: %s", event_type, exc
+                )
+
+    def publish_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        """Публикует произвольное событие (используется mine() для
+        share-found / share-accepted / share-rejected / job-change).
+
+        Публичный alias для ``_publish``, чтобы внешний код не лез в
+        приватный API. Имя события — строка, payload — JSON-сериализуемый
+        dict.
+        """
+        self._publish(event_type, payload)
 
 
 def format_rate(rate: float) -> str:
