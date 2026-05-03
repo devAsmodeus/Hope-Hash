@@ -1,6 +1,6 @@
 """Hope-Hash — учебный solo BTC miner на чистом stdlib."""
 
-__version__ = "0.7.0"
+__version__ = "0.7.0"  # x-release-please-version
 
 from . import sha_native
 from .banner import print_banner, render_banner

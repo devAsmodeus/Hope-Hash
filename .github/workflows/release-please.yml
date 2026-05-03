@@ -1,0 +1,35 @@
+name: Release Please
+
+# Why the custom token:
+#
+# release-please opens its release PR on every push to main. By default it
+# uses the workflow-provided GITHUB_TOKEN; PRs created with that token do
+# not trigger downstream workflows (GitHub Actions safety against recursion).
+# Without a custom token, the release PR sits with no `CI` checks running
+# and stays BLOCKED by branch protection.
+#
+# RELEASE_PLEASE_TOKEN is a fine-grained PAT (scope: contents:write,
+# pull-requests:write on this repo) stored as a repo secret. PRs opened
+# with it appear from the PAT owner's account and trigger CI normally.
+# If the secret is absent, we fall back to GITHUB_TOKEN — the release PR
+# will still be created but will require a manual close+reopen to trigger
+# the required checks.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          release-type: python
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

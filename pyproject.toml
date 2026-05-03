@@ -4,6 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hope-hash"
+version = "0.7.0"  # x-release-please-version
 description = "Учебный solo BTC miner на чистом Python stdlib"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,7 +26,6 @@ classifiers = [
     "Topic :: Security :: Cryptography",
 ]
 dependencies = []
-dynamic = ["version"]
 
 [project.urls]
 Repository = "https://github.com/devAsmodeus/Hope-Hash"
@@ -34,8 +34,10 @@ Issues = "https://github.com/devAsmodeus/Hope-Hash/issues"
 [project.scripts]
 hope-hash = "hope_hash.cli:main"
 
-[tool.hatch.version]
-path = "src/hope_hash/__init__.py"
+# Версия — двойной источник: статическая в [project].version и в
+# `__init__.py.__version__`. release-please-action синхронизирует обе
+# при бампе. Для рантайм-кода используется только __version__ (через
+# `from hope_hash import __version__`).
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hope_hash"]
