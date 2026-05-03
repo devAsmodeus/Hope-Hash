@@ -1,14 +1,25 @@
 """Hope-Hash — учебный solo BTC miner на чистом stdlib."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
+from . import sha_native
 from .banner import print_banner, render_banner
-from .bench import BenchResult, run_benchmark
+from .bench import BenchResult, available_backends, run_benchmark, run_benchmark_all_backends
 from .block import build_merkle_root, difficulty_to_target, double_sha256, swap_words
 from .demo import run_demo
 from .metrics import Metrics, MetricsServer, build_health_snapshot
 from .miner import mine
 from .notifier import TelegramNotifier
+from .pools import PoolList, parse_pool_spec
+from .solo import (
+    BitcoinRPC,
+    RPCError,
+    SoloClient,
+    build_coinbase,
+    compute_witness_commitment,
+    parse_default_witness_commitment,
+    serialize_block,
+)
 from .storage import ShareStore
 from .stratum import StratumClient
 from .tui import StatsProvider, StatsSnapshot, TUIApp
@@ -22,6 +33,8 @@ __all__ = [
     "mine",
     "run_demo",
     "run_benchmark",
+    "run_benchmark_all_backends",
+    "available_backends",
     "BenchResult",
     "ShareStore",
     "Metrics",
@@ -33,5 +46,15 @@ __all__ = [
     "TUIApp",
     "print_banner",
     "render_banner",
+    "PoolList",
+    "parse_pool_spec",
+    "BitcoinRPC",
+    "RPCError",
+    "SoloClient",
+    "build_coinbase",
+    "compute_witness_commitment",
+    "parse_default_witness_commitment",
+    "serialize_block",
+    "sha_native",
     "__version__",
 ]
