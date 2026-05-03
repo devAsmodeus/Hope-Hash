@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hope-hash"
-version = "0.7.0"  # x-release-please-version
+version = "0.7.1"  # x-release-please-version
 description = "Учебный solo BTC miner на чистом Python stdlib"
 readme = "README.md"
 requires-python = ">=3.11"

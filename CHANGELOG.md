@@ -5,6 +5,13 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 проект придерживается [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [0.7.1](https://github.com/devAsmodeus/Hope-Hash/compare/v0.7.0...v0.7.1) (2026-05-03)
+
+
+### Bug Fixes
+
+* solo prev-hash BLOCKER + S1-S4 doc fixes + release-please ([#9](https://github.com/devAsmodeus/Hope-Hash/issues/9)) ([aeac6d7](https://github.com/devAsmodeus/Hope-Hash/commit/aeac6d7dccf4878f784d2ebf3845967a10fd8c35))
+
 ## [Unreleased]
 
 ### Исправлено
