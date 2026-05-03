@@ -7,7 +7,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from hope_hash.block import double_sha256
+from hope_hash.block import double_sha256, swap_words
+from hope_hash.miner import _build_header_base
 from hope_hash.solo import (
     BitcoinRPC,
     RPCError,
@@ -353,6 +354,51 @@ class TestSoloClient(unittest.TestCase):
         )
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0][1])
+
+    def test_template_to_job_prevhash_internal_le_after_swap_words(self):
+        # B1 regression sentinel — final-review.md.
+        # Real mainnet block #800000 prev hash (display BE):
+        # bitcoind отдаёт previousblockhash в display-форме; в block header
+        # должна лежать internal LE (= display BE, развёрнутый побайтно).
+        # _build_header_base применяет swap_words к prevhash из job-словаря,
+        # так что после swap_words мы обязаны получить ровно prev_be[::-1].
+        real_prev_be_hex = (
+            "00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054"
+        )
+        prev_be = bytes.fromhex(real_prev_be_hex)
+        prev_internal_le = prev_be[::-1]
+
+        # Symmetric fixture скрывал бы баг: убеждаемся что prevhash вообще
+        # несимметричный (любой no-op-фикс на нём провалится).
+        self.assertNotEqual(prev_be, prev_internal_le)
+
+        tmpl = dict(FAKE_TEMPLATE, previousblockhash=real_prev_be_hex)
+        client = self._make_client(rpc=FakeRPC(template=tmpl))
+        client.connect()
+
+        job = client.current_job
+        self.assertEqual(swap_words(job["prevhash"]), prev_internal_le)
+
+    def test_build_header_base_uses_internal_le_prevhash(self):
+        # Сквозной чек: hashing-time header (mining) и submit-time header
+        # (_assemble_header) должны видеть одинаковый prev_hash.
+        # До B1-фикса miner получал display BE, submitter — internal LE,
+        # и они расходились.
+        real_prev_be_hex = (
+            "00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054"
+        )
+        prev_internal_le = bytes.fromhex(real_prev_be_hex)[::-1]
+
+        tmpl = dict(FAKE_TEMPLATE, previousblockhash=real_prev_be_hex)
+        client = self._make_client(rpc=FakeRPC(template=tmpl))
+        client.connect()
+
+        header_base = _build_header_base(
+            client.current_job, extranonce1="", extranonce2="00000000"
+        )
+        # Layout: 4b version | 32b prev_hash | 32b merkle | 4b ntime | 4b nbits
+        prev_in_header = header_base[4:36]
+        self.assertEqual(prev_in_header, prev_internal_le)
 
 
 class TestBitcoinRPCAuth(unittest.TestCase):

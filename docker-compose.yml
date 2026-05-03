@@ -7,11 +7,13 @@
 #      для Telegram-уведомлений.
 #
 #   docker compose up -d
-#   open http://localhost:8000      # web-дашборд
+#   open http://localhost:8001      # web-дашборд (single-page UI)
+#   open http://localhost:8000/metrics   # Prometheus exposition
+#   open http://localhost:8000/healthz   # health JSON (200/503)
 #   open http://localhost:3000      # Grafana (admin / admin при первом входе)
 #   open http://localhost:9090      # Prometheus UI
 #
-# Если порт 8000 занят — поменяйте маппинг здесь и у Prometheus в
+# Если порт 8000 или 8001 занят — поменяйте маппинг здесь и у Prometheus в
 # deploy/prometheus/prometheus.yml.
 
 services:

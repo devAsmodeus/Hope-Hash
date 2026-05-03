@@ -6,6 +6,14 @@
 **Tests:** 242 passing, ~17s wall, no flakes.
 **Reviewers:** code, security, docs/UX, test coverage (4 parallel agents).
 
+> **Update (2026-05-03):** B1 BLOCKER and all four S1–S4 SHOULD-FIX
+> items have been addressed in a follow-up commit on this branch.
+> Tests now 244 (B1 added two regression sentinels — non-symmetric
+> mainnet prevhash and a `_build_header_base` byte-position assertion).
+> M-1 through M-4, the six test-gap items and the eleven docs
+> nice-to-haves are tracked in [ROADMAP.md](../../ROADMAP.md) under
+> *«Запланировано на v0.7.x / v0.8.0»*.
+
 Detailed reports:
 - [`review-code.md`](./review-code.md)
 - [`review-security.md`](./review-security.md)

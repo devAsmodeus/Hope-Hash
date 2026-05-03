@@ -7,6 +7,55 @@
 
 ## [Unreleased]
 
+### Исправлено
+- **`solo.py:_template_to_job` — prev-hash byte-order BLOCKER.**
+  Stratum-style формат для `prevhash` собирался из display-BE с
+  word-swap'ом, что после применения `swap_words` в `_build_header_base`
+  сокращалось в no-op и оставляло display-BE в hashing-time header'е.
+  Submit-time `_assemble_header` независимо делает `BE→LE`, поэтому
+  заголовки для майнинга и для submit'а расходились — на реальном
+  bitcoind solo-режим тихо производил бы невалидные блоки. Теперь:
+  `prev_internal_le = prev_be[::-1]` → потом per-4-byte reverse, чтобы
+  `swap_words` дал ровно internal LE. Тестовый `FAKE_TEMPLATE` ранее
+  маскировал баг (`previousblockhash = "0"*64` — фикспоинт под любой
+  байт-перестановкой).
+- **`docker-compose.yml` шапка** — указывала `:8000` для веб-дашборда,
+  тогда как фактически дашборд на `:8001`, а на `:8000` — Prometheus
+  exposition + healthz. Комментарий синхронизирован с реальностью.
+- **`docs/deploy.{en,ru}.md` §6 `docker run` пример** — позиционник
+  `docker` читался как сабкоманда; заменён на `mybox` с пояснением,
+  что это просто `worker_name` для пула.
+- **`CHANGELOG.md` link footer** — `[Unreleased]` сравнивался против
+  `v0.2.0`, версии 0.3.0–0.7.0 не имели compare-link'ов; восстановлено.
+- **`README.md` advanced-flags table (EN + RU)** — добавлен `--log-file
+  PATH`, который реально живёт в `cli.py` и используется в TUI workflow.
+
+### Добавлено
+- **Regression sentinels** для B1 в [tests/test_solo.py](tests/test_solo.py):
+  `test_template_to_job_prevhash_internal_le_after_swap_words` (real
+  mainnet block #800000 prev hash, проверка что `swap_words(job["prevhash"])
+  == prev_be[::-1]`) и `test_build_header_base_uses_internal_le_prevhash`
+  (сквозной чек что hashing-time header содержит ровно internal LE
+  в позиции 4..36). Тестов: 242 → **244**.
+- **release-please workflow** ([.github/workflows/release-please.yml](.github/workflows/release-please.yml))
+  + [release-please-config.json](release-please-config.json) +
+  [.release-please-manifest.json](.release-please-manifest.json).
+  Теперь conventional-commit пуши в `main` автоматически открывают
+  release-PR с агрегированным CHANGELOG, бампом версии в
+  `pyproject.toml` и `__init__.py` (через `x-release-please-version`
+  маркеры), GitHub-релизом + тегом. PAT `RELEASE_PLEASE_TOKEN`
+  опционален: без него релиз-PR создаётся, но downstream-CI не
+  триггерится — нужен manual close+reopen.
+
+### Изменено
+- **`pyproject.toml`** — статическая `version = "0.7.0"` вместо
+  `dynamic = ["version"]` (release-please ожидает статический поле для
+  in-place бампа). `[tool.hatch.version]` блок удалён. `__version__` в
+  `src/hope_hash/__init__.py` остаётся single source of truth для
+  runtime-кода (`from hope_hash import __version__`); release-please
+  держит обе строки в синхроне через `x-release-please-version`
+  comment-маркеры.
+
 ## [0.7.0] — 2026-05-02
 
 ### Добавлено
@@ -254,6 +303,11 @@
 - 15 юнит-тестов на криптографические функции (`unittest`).
 - Реструктуризация в `src/`-layout с пакетом `hope_hash`.
 
-[Unreleased]: https://github.com/devAsmodeus/Hope-Hash/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/devAsmodeus/Hope-Hash/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/devAsmodeus/Hope-Hash/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/devAsmodeus/Hope-Hash/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/devAsmodeus/Hope-Hash/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/devAsmodeus/Hope-Hash/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/devAsmodeus/Hope-Hash/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/devAsmodeus/Hope-Hash/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/devAsmodeus/Hope-Hash/releases/tag/v0.1.0

@@ -79,8 +79,11 @@ docker run -d --name hope-hash \
   -p 8000:8000 -p 8001:8001 \
   -v $(pwd)/data:/data \
   hope-hash:0.7.0 \
-  bc1q...your_address... docker --workers 2 \
+  bc1q...your_address... mybox \
+  --workers 2 \
   --metrics-port 8000 --web-port 8001 --web-host 0.0.0.0 --no-banner
+# positional args: <BTC_ADDRESS> <WORKER_NAME> — the literal "mybox"
+# is just the worker_name shown to the pool; pick anything you like.
 ```
 
 ## 7. Behind a reverse proxy

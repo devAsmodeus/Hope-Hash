@@ -79,6 +79,7 @@ the first network round-trip — typos fail fast with a precise message.
 | `--suggest-diff DIFF` | Send `mining.suggest_difficulty` after authorize (vardiff). |
 | `--demo` | Offline mode against a synthetic header. |
 | `--benchmark` | Hashrate microbenchmark, no networking. |
+| `--log-file PATH` | Mirror logs to a file (handy with `--tui`, which clears stderr). |
 | `--no-banner` | Skip the ASCII banner (cron / systemd). |
 
 Full help: `hope-hash --help`.
@@ -220,6 +221,7 @@ python -m hope_hash bc1q5n2x4pvxhq8sxc7ck3uxq8sxc7ck3uxqzfm2py mylaptop
 | `--suggest-diff DIFF` | Отправляет `mining.suggest_difficulty` после авторизации. |
 | `--demo` | Offline-режим с синтетическим заголовком. |
 | `--benchmark` | Микробенчмарк хешрейта без сети. |
+| `--log-file PATH` | Дублировать логи в файл (полезно с `--tui`, которая зачищает stderr). |
 | `--no-banner` | Без ASCII-баннера (cron / systemd). |
 
 Полная справка: `hope-hash --help`.

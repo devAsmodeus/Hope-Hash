@@ -78,8 +78,11 @@ docker run -d --name hope-hash \
   -p 8000:8000 -p 8001:8001 \
   -v $(pwd)/data:/data \
   hope-hash:0.7.0 \
-  bc1q...твой_адрес... docker --workers 2 \
+  bc1q...твой_адрес... mybox \
+  --workers 2 \
   --metrics-port 8000 --web-port 8001 --web-host 0.0.0.0 --no-banner
+# позиционные аргументы: <BTC_ADDRESS> <WORKER_NAME> — литерал "mybox"
+# здесь это просто имя воркера для пула; подставьте любое.
 ```
 
 ## 7. За reverse-proxy

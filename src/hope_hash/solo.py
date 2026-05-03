@@ -504,20 +504,24 @@ class SoloClient:
         txids = [bytes.fromhex(tx["txid"])[::-1] for tx in tmpl.get("transactions", [])]
         branch = self._merkle_branch_from_txids(txids)
 
-        # Stratum-style формат: prevhash word-swap'ed; в solo-режиме мы
-        # шаблон отдаём «как есть», а в `_build_header_base` всё равно
-        # будет swap_words применён → значит здесь нужен ОБРАТНЫЙ swap,
-        # чтобы compose был корректным. Делаем raw prevhash и в miner.py
-        # _build_header_base вызовет swap_words → получим как надо.
-        # bitcoind отдаёт previousblockhash big-endian hex (display), нам
-        # нужен LE для header. swap_words конвертирует «stratum-формат»
-        # обратно в LE; чтобы совпало, передадим prevhash в stratum-формате.
+        # bitcoind отдаёт previousblockhash в display (big-endian) форме,
+        # а в block header нужен internal little-endian (BE[::-1]).
+        # `_build_header_base` применяет к нашему prevhash `swap_words`,
+        # которая разворачивает каждую 4-байтную группу. Чтобы после
+        # swap_words получился internal LE, передаём internal LE с
+        # пред-развёрнутыми 4-байтными группами — два разворота
+        # сократятся, и в header ляжет правильная LE.
+        #
+        # Маскировалось до фикса: тестовый FAKE_TEMPLATE.previousblockhash
+        # = "0"*64 — симметричный фикспоинт под любой перестановкой
+        # байт. На реальном bitcoind мы бы тихо подписывали невалидные
+        # шары: hashing-time header содержал бы display BE вместо LE,
+        # а submit-time _assemble_header независимо делает BE→LE и
+        # отдавал бы другой header. См. docs/handoff/final-review.md B1.
         prev_be = bytes.fromhex(tmpl["previousblockhash"])
-        # Stratum prev = big-endian с word-swap'ом по 4 байта.
-        # Inverse: байты берём как есть (display=BE), а внутри 4-байтных
-        # групп переставляем little-endian → swap_words восстановит BE.
+        prev_internal_le = prev_be[::-1]
         prev_stratum_hex = b"".join(
-            prev_be[i:i+4][::-1] for i in range(0, 32, 4)
+            prev_internal_le[i:i+4][::-1] for i in range(0, 32, 4)
         ).hex()
 
         # version/bits/curtime приходят как int → конвертируем в hex BE-строку,
