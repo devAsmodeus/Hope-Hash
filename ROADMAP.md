@@ -122,6 +122,80 @@ TUI и команды Telegram — отложены.
 
 ---
 
+## Запланировано на v0.7.x / v0.8.0 (post-v0.7.0 follow-up)
+
+Из консолидированного [final-review](docs/handoff/final-review.md) от
+2026-05-02. **B1 BLOCKER и S1–S4 SHOULD-FIX** уже закрыты в этом же
+PR-стеке (см. CHANGELOG `Unreleased`). Ниже — что осталось.
+
+### Безопасность (4 MEDIUM, фиксить до non-localhost деплоя)
+
+- [ ] **M-1 — `/api/events` SSE без cap'а соединений.** В
+  [webui.py](src/hope_hash/webui.py) per-connection
+  `queue.Queue(maxsize=256)` + поток на запрос. На loopback OK, но
+  compose биндит `0.0.0.0`. **Фикс:** `max_subscribers` cap (default 32) +
+  HTTP 503 при overflow + `_subscribers` cleanup на disconnect.
+- [ ] **M-2 — `BitcoinRPC` cookie-file без size-guard'а.** В
+  [solo.py](src/hope_hash/solo.py) `Path(cookie_path).read_text()` без
+  лимита и `try/except`. `--rpc-cookie /tmp` уронит майнер OOM'ом.
+  **Фикс:** `os.stat()` → лимит 4 KiB → `OSError` → дружелюбная
+  CLI-ошибка.
+- [ ] **M-3 — `ctypes.CDLL("libcrypto-3.dll")` DLL hijack на Windows.**
+  В [sha_native.py](src/hope_hash/sha_native.py) загрузка по голому
+  имени → DLL search order включает cwd. **Фикс:** `ctypes.WinDLL(...,
+  winmode=LOAD_LIBRARY_SEARCH_SYSTEM32)` или `os.add_dll_directory()` с
+  известным путём.
+- [ ] **M-4 — docker-compose `0.0.0.0` + Grafana `admin/admin`.**
+  Префикс `127.0.0.1:` на `ports`, `${GRAFANA_PASSWORD:?GRAFANA_PASSWORD
+  must be set}` идиома, чтобы compose отказывался стартовать без
+  пароля.
+
+### Test gaps (6 пунктов из ревью)
+
+- [ ] Mid-state ↔ ctypes parity sentinel (защита от регресса
+  endianness `_worker_ctypes` vs `_worker_hashlib_midstate`).
+- [ ] `SoloClient.reader_loop` RPC failure path.
+- [ ] `SoloClient` без `default_witness_commitment` (regtest /
+  non-segwit templates).
+- [ ] `cli._build_pool_list` и `_resolve_sha_backend` —
+  `tests/test_cli_helpers.py`.
+- [ ] `webui._serve_events` cleanup на disconnect (smoke-тест,
+  что `_subscribers` возвращается к baseline).
+- [ ] `StatsProvider.publish_event` под concurrent
+  subscribe/unsubscribe.
+
+### Non-blocking code concerns
+
+- [ ] [cli.py:460-466](src/hope_hash/cli.py#L460): убрать
+  monkey-patch `stats_provider.update_hashrate`, поднять
+  `last_hashrate_ts` в `StatsSnapshot`.
+- [ ] [notifier.py:307](src/hope_hash/notifier.py#L307): мёртвая
+  boolean clause; вероятно `if item is None or
+  self._stop_event.is_set():`.
+- [ ] [solo.py:489-499](src/hope_hash/solo.py#L489): `deadbeef`
+  extranonce-маркер с 2⁻³² collision risk. Заменить на 16-байт
+  `os.urandom`.
+- [ ] [solo.py:407-452](src/hope_hash/solo.py#L407): `submit()` синхронно
+  в mine-thread; задокументировать в `architecture.{en,ru}.md`.
+- [ ] [webui.py:331-336](src/hope_hash/webui.py#L331): `repr(exc)` в
+  healthz HTTP body; на loopback мягко, но фильтр не лишний.
+- [ ] [parallel.py:275-276](src/hope_hash/parallel.py#L275): bare
+  `except Exception: pass` на queue cleanup.
+
+### Docs nice-to-haves (11 пунктов)
+
+- [ ] **N1**: валидация `--solo` argument-tuple до BTC-address validation.
+- [ ] **N2**: bilingual `argparse` help-тексты (сейчас только русские).
+- [ ] **N3**: `architecture.{en,ru}.md` — упомянуть, что Telegram inbound
+  требует `HOPE_HASH_TELEGRAM_INBOUND=1`.
+- [ ] **N6/N7**: `deploy.{en,ru}.md` §3 — `degraded` отдаёт 200, не 503.
+- [ ] **N10**: `Dockerfile` `EXPOSE` — синхронизировать с compose
+  (8000 + 8001, не 8000 + 9090).
+- [ ] **N11**: `architecture.{en,ru}.md` file-map — добавить
+  `_logging.py` и `__main__.py`.
+
+---
+
 ## Сознательно отложено (не включено в v0.7.0)
 
 После трёх PR'ов (ops/UX, perf/resilience, web/docs) вот что **намеренно**
