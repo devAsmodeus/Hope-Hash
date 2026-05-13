@@ -16,6 +16,12 @@ jobs:
       matrix:
         python: ["3.11", "3.12", "3.13"]
         os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # Advance test of the windows-latest -> VS2026 migration
+          # (GitHub-hosted runners: rollout 2026-06-08..06-15).
+          # Drop this entry once the migration completes if green.
+          - python: "3.12"
+            os: windows-2025-vs2026
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
